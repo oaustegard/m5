@@ -34,11 +34,12 @@ idf.py -p /dev/ttyACM0 build flash monitor   # use your serial port
 
 Each directory is licensed as permissively as its sources allow. A
 `LICENSE` file in a project directory overrides the root one for everything
-under it.
+under it, except files whose `SPDX-License-Identifier` header names another
+license.
 
 | path | license | why |
 |---|---|---|
 | everything without its own `LICENSE` | MIT (root `LICENSE`) | default |
-| `doom/` | GPL-3.0 (`doom/LICENSE`) | built on PrBoom (GPL-2.0-or-later) and a retro-go file under GPL-3.0 |
-| `doom/main/m5_hal.*` | MIT | written here; reusable outside `doom/` |
-| `doom/wads/DOOM1.WAD` | id Software shareware terms | redistributable unmodified; not GPL |
+| `doom/` | GPL-3.0 (`doom/LICENSE`) | `doom/main/doom_main.c` is adapted from a GPL-3.0 file in retro-go (an ESP32 emulator firmware), and the PrBoom engine is GPL-2.0-or-later, so the combination is GPL-3.0 |
+| `doom/main/m5_hal.cpp`, `doom/main/m5_hal.h` | MIT (root `LICENSE`, by SPDX header) | original to this repo; reusable outside `doom/` |
+| `doom/wads/DOOM1.WAD` | id Software's shareware terms, stated in the WAD's original distribution | redistributable unmodified; not GPL |

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Thin C interface over M5Unified for the Core2, so the Doom platform layer
 // (plain C, like the engine) never touches C++.
 #pragma once

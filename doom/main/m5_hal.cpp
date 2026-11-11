@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include "m5_hal.h"
 
 #include <M5Unified.h>

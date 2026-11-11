@@ -113,6 +113,11 @@ work; that is untested.
 
 ## Credits and licenses
 
+This directory is GPL-3.0 (`LICENSE`). `main/doom_main.c` is adapted from a
+retro-go file licensed GPL-3.0, and PrBoom's GPL-2.0-or-later allows the
+combination under version 3. `main/m5_hal.cpp` and `m5_hal.h` are MIT, as
+marked in their SPDX headers.
+
 PrBoom is by Florian Schulze, Colin Phipps, Neil Stevens, Andrey Budko and
 the Boom and MBF authors before them (GPL-2.0-or-later; see
 `components/prboom/COPYING` and `AUTHORS`). The ESP32 port lineage runs

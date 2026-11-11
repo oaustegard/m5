@@ -32,6 +32,13 @@ idf.py -p /dev/ttyACM0 build flash monitor   # use your serial port
 
 ## License
 
-Code in this repository is under the GPL-2.0 (see `LICENSE`). The Doom
-engine is PrBoom, which is GPL-2.0-or-later. `doom/wads/DOOM1.WAD` is not
-GPL: it is id Software's shareware data file, redistributable unmodified.
+Each directory is licensed as permissively as its sources allow. A
+`LICENSE` file in a project directory overrides the root one for everything
+under it.
+
+| path | license | why |
+|---|---|---|
+| everything without its own `LICENSE` | MIT (root `LICENSE`) | default |
+| `doom/` | GPL-3.0 (`doom/LICENSE`) | built on PrBoom (GPL-2.0-or-later) and a retro-go file under GPL-3.0 |
+| `doom/main/m5_hal.*` | MIT | written here; reusable outside `doom/` |
+| `doom/wads/DOOM1.WAD` | id Software shareware terms | redistributable unmodified; not GPL |

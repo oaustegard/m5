@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-only
 /*
  * PrBoom platform layer for the M5Stack Core2.
  *
  * Adapted from retro-go's prboom-go/main/main.c (Copyright (c) 2019 ducalex,
- * GPL), with retro-go's system layer replaced by M5Unified (m5_hal.cpp),
+ * GPL-3.0), with retro-go's system layer replaced by M5Unified (m5_hal.cpp),
  * flash FAT partitions for WADs and saves, and tilt + touch controls.
  */
 

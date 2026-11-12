@@ -4,9 +4,10 @@ PrBoom 2.5 (a source port of id Software's Doom engine) with the shareware
 episode, running on an M5Stack Core2. The engine comes from
 [retro-go](https://github.com/ducalex/retro-go), an emulator firmware for
 ESP32 handhelds that ships PrBoom as one of its apps. This project replaces
-retro-go's system layer with one for the Core2. **This code has not been
-compiled or run yet.** Expect a round of build fixes and on-device tuning
-before the first playable frame.
+retro-go's system layer with one for the Core2. It compiles with ESP-IDF
+v5.4.4 and plays in Espressif's QEMU emulator (see "Testing in QEMU").
+**It has not run on a Core2 yet**, so the M5Unified display, touch, motion
+and speaker code is untested and the tilt settings are guesses.
 
 ## Layout
 
@@ -15,6 +16,9 @@ before the first playable frame.
 | `components/prboom/` | the engine, copied from retro-go's `prboom-go/components/prboom` at commit `4ced120` |
 | `main/doom_main.c` | the platform layer (the `I_*` functions the engine calls): video, sound, music, input, boot |
 | `main/m5_hal.cpp` | a C wrapper over M5Stack's M5Unified library for the display, touch panel, IMU and speaker |
+| `main/qemu_hal.c` | the same interface for QEMU: a virtual display, discarded audio and a scripted input sequence |
+| `tools/qemu_run.py` | builds the QEMU variant, boots it and saves a screenshot at each point the script marks |
+| `sdkconfig.qemu` | the settings the QEMU variant layers on `sdkconfig.defaults` |
 | `wads/DOOM1.WAD` | the shareware game data file (IWAD), packed into the `wads` flash partition at build time |
 | `partitions.csv` | 3 MB app, 12 MB read-only WAD partition, 960 KB wear-levelled save partition |
 
@@ -50,6 +54,30 @@ Any IWAD up to 12 MB fits. The registered `DOOM.WAD` (11 MB) does and
 `DOOM2.WAD` (14.6 MB) does not. To use another IWAD, put it in `wads/` and
 change `IWAD` in `main/doom_main.c` to its name.
 
+## Testing in QEMU
+
+Espressif's fork of QEMU emulates the ESP32 with its flash and PSRAM, plus a
+virtual display. It does not emulate the Core2's screen controller, touch
+panel, IMU or speaker, so the QEMU variant swaps `m5_hal.cpp` for
+`qemu_hal.c` and everything else is the hardware code: boot, partitions,
+WAD loading, the engine, sound and music mixing, and the input mapping in
+`doom_main.c`. Install QEMU once, then run the harness from this directory:
+
+```sh
+python $IDF_PATH/tools/idf_tools.py install qemu-xtensa
+python tools/qemu_run.py
+```
+
+It builds into `build-qemu/`, boots the image and plays a script: open the
+menu, start E1M1 on Hurt Me Plenty, tilt to walk, touch to fire, tilt to
+turn, switch weapon, open and close the automap, open the menu with a C hold
+and move down it. At each marked point the firmware freezes and the harness
+saves a PNG to `build-qemu/run/`. It exits 0 when the script finishes and
+non-zero on a crash or a timeout. The frame rate it prints is the
+emulator's, not the Core2's.
+
+![Ten screenshots from a QEMU run, from the title screen to the in-game menu](docs/qemu-session.png)
+
 ## Controls
 
 The Core2's buttons A, B and C are the three circles printed under the
@@ -61,7 +89,7 @@ screen. They are zones of the same touch panel that covers the screen.
 | tilt (right edge down / left edge down) | turn right / left | — |
 | touch the screen | fire, while held | left third: slider left · middle: select · right third: slider right |
 | A (left circle) | use / open doors; hold 1.2 s to re-centre tilt | up |
-| B (middle circle) | next weapon | select (also answers yes) |
+| B (middle circle) | switch weapon (PrBoom's toggle between your two preferred weapons) | select (also answers yes) |
 | C (right circle) | automap; hold 0.5 s for the menu | down; hold 0.5 s to go back (also answers no) |
 
 Tilt is measured from the pose the device is in when the game starts, so hold
@@ -106,6 +134,10 @@ work; that is untested.
   The plan is a Bluetooth gamepad through Bluepad32, a library that connects
   console controllers to an ESP32. The open question is whether the ESP32's
   Bluetooth stack, which needs internal RAM, fits beside Doom.
+- Flash runs in QIO mode on the Core2. Espressif's QEMU fails direct flash
+  reads in QIO mode (the WAD partition will not mount), so `sdkconfig.qemu`
+  switches the emulator build to DIO. If the Core2 logs `f_mount failed` for
+  `/wads`, set `CONFIG_ESPTOOLPY_FLASHMODE_DIO=y` for the hardware build too.
 - PSRAM runs at 80 MHz. If the board boot-loops with PSRAM errors in the
   monitor output, set `CONFIG_SPIRAM_SPEED_40M=y` in `sdkconfig.defaults`
   and delete `sdkconfig` before rebuilding (ESP-IDF reads the defaults only

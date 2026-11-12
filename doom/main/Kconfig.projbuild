@@ -1,0 +1,13 @@
+menu "Core2 DOOM"
+
+config DOOM_QEMU
+    bool "Build for Espressif QEMU instead of the Core2"
+    default n
+    help
+        Replaces the M5Unified hardware layer with one that draws to QEMU's
+        virtual RGB panel, stubs audio, and plays a scripted input sequence
+        that starts a game and exercises the controls. It prints
+        "SHOT <name>" on the console when a frame worth capturing is on
+        screen; tools/qemu_run.py turns those into screenshots.
+
+endmenu

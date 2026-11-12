@@ -1,0 +1,4 @@
+# Layered on sdkconfig.defaults by tools/qemu_run.py for the emulator build.
+CONFIG_DOOM_QEMU=y
+# Espressif QEMU fails direct flash reads in QIO mode (f_mount -> FR_DISK_ERR)
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y

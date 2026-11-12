@@ -9,6 +9,13 @@
 
 #include "m5_hal.h"
 
+#include <doomstat.h>
+#include <p_inter.h>
+#include <p_mobj.h>
+#include <tables.h>
+#include <info.h>
+#include <m_fixed.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -60,6 +67,8 @@ typedef struct {
     int min_reads;       // ...and at least this many hal_input_read calls
     const char *shot;    // if set, announce a screenshot once a frame is drawn
     const char *note;
+    int damage;          // if set, deal this much damage to the player on entry
+    bool spawn;          // if set, spawn a zombieman 128 units ahead on entry
 } step_t;
 
 static const step_t script[] = {
@@ -72,6 +81,9 @@ static const step_t script[] = {
     {0, false, 0, 0, 600, 3, "03-skill-menu", NULL},
     {B, false, 0, 0, 150, 3, NULL, "Hurt Me Plenty"},
     {0, false, 0, 0, 2500, 20, "04-e1m1-start", "level loaded"},
+    {0, false, 0, 0, 600, 10, "04b-zombieman", "spawn a zombieman ahead (test injection)", 0, true},
+    {0, true, 0, 0, 2500, 40, NULL, "touch: shoot the zombieman"},
+    {0, false, 0, 0, 600, 10, "04c-zombieman-shot", NULL},
     {0, false, 0, 0.30f, 2000, 30, NULL, "tilt forward: walk"},
     {0, false, 0, 0, 300, 3, "05-after-walk", NULL},
     {0, true, 0, 0, 200, 3, "06-firing", "touch: fire"},
@@ -79,6 +91,8 @@ static const step_t script[] = {
     {0, false, 0, 0, 300, 3, NULL, NULL},
     {0, false, 0.30f, 0, 1200, 20, NULL, "tilt right: turn"},
     {0, false, 0, 0, 300, 3, "07-after-turn", NULL},
+    {0, false, 0, 0, 800, 10, NULL, "take 15 damage (test injection)", 15},
+    {0, false, 0, 0, 300, 3, "07c-hurt", NULL},
     {B, false, 0, 0, 150, 3, NULL, "B: weapon toggle (pistol to fist)"},
     {0, false, 0, 0, 300, 3, NULL, NULL},
     {C, false, 0, 0, 150, 3, NULL, "C tap: automap"},
@@ -111,6 +125,16 @@ static void script_enter(int i)
     step_reads = 0;
     if (i < (int)SCRIPT_LEN && script[i].note)
         printf("SCRIPT %d: %s\n", i, script[i].note);
+    mobj_t *pmo = players[consoleplayer].mo;
+    if (i < (int)SCRIPT_LEN && script[i].damage && pmo)
+        P_DamageMobj(pmo, NULL, NULL, script[i].damage);
+    if (i < (int)SCRIPT_LEN && script[i].spawn && pmo)
+    {
+        unsigned an = pmo->angle >> ANGLETOFINESHIFT;
+        P_SpawnMobj(pmo->x + FixedMul(128 * FRACUNIT, finecosine[an]),
+                    pmo->y + FixedMul(128 * FRACUNIT, finesine[an]),
+                    ONFLOORZ, MT_POSSESSED);
+    }
 }
 
 // ---- HAL ------------------------------------------------------------------
@@ -223,6 +247,13 @@ deliver:
     in->touch_y = HAL_SCREEN_H / 2;
     in->ax = s->tilt_x;
     in->ay = s->tilt_y;
+}
+
+// ---- Vibration: logged ----------------------------------------------------
+
+void hal_vibrate(uint8_t level)
+{
+    printf("VIB %u t=%lld\n", level, (long long)now_ms());
 }
 
 // ---- Audio: counted and discarded -----------------------------------------

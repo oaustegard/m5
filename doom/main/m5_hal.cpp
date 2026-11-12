@@ -92,6 +92,13 @@ extern "C" void hal_input_read(hal_input_t *in)
     }
 }
 
+extern "C" void hal_vibrate(uint8_t level)
+{
+    // AXP192 LDO3 on the original Core2, AXP2101 DLDO1 on v1.1;
+    // M5Unified maps the level to a rail voltage (255 is about 3.5 V).
+    M5.Power.setVibration(level);
+}
+
 extern "C" bool hal_sfx_play(int channel, const uint8_t *data, size_t len, uint32_t rate, uint8_t volume)
 {
     M5.Speaker.setChannelVolume(channel, volume);

@@ -41,6 +41,7 @@
 #include "d_deh.h"  // Ty 03/22/98 - externalized strings
 #include "p_tick.h"
 #include "lprintf.h"
+#include "i_system.h" // m5: I_HapticHit
 
 #include "p_inter.h"
 #include "p_enemy.h"
@@ -831,6 +832,10 @@ void P_DamageMobj(mobj_t *target,mobj_t *inflictor, mobj_t *source, int damage)
       if (player->damagecount > 100)
         player->damagecount = 100;  // teleport stomp does 10k points...
     }
+
+  // m5: haptic feedback when the local player lands a hit
+  if (source && source->player == &players[consoleplayer] && target != source)
+    I_HapticHit(damage, target->health - damage <= 0);
 
   // do the damage
   target->health -= damage;

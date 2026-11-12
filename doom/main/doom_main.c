@@ -44,6 +44,8 @@
 #include <mus2mid.h>
 #include <midifile.h>
 #include <oplplayer.h>
+#include <p_pspr.h>
+#include <d_player.h>
 #include <lprintf.h>
 
 #include "m5_hal.h"
@@ -334,6 +336,141 @@ void I_SetMusicVolume(int volume)
     music_player->setvolume(volume);
 }
 
+// ---- Haptics --------------------------------------------------------------
+//
+// The Core2's vibration motor plays short patterns: a blip when a weapon
+// fires (longer for heavy weapons), a tick when a shot lands on something
+// (stronger on a kill), and a pulse-pause-pulse when the player is hurt,
+// longer for bigger hits. A pattern only interrupts one of equal or lower
+// priority. Everything here runs on the game thread, so the motor's I2C
+// writes never race M5.update().
+
+typedef struct {
+    uint8_t level;   // motor strength, 0 = off
+    uint16_t ms;
+} haptic_seg_t;
+
+enum { PRIO_HIT = 1, PRIO_FIRE = 2, PRIO_HURT = 3 };
+
+#define HAPTIC_MAX_SEGS 4
+
+static haptic_seg_t haptic_pat[HAPTIC_MAX_SEGS];
+static int haptic_len, haptic_idx = -1, haptic_prio;
+static int64_t haptic_seg_end;
+static uint8_t haptic_level_now;
+
+static int64_t ms_now(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
+static void haptic_set(uint8_t level)
+{
+    if (level != haptic_level_now)
+    {
+        hal_vibrate(level);
+        haptic_level_now = level;
+    }
+}
+
+static void haptic_play(int prio, const haptic_seg_t *segs, int n)
+{
+    if (haptic_idx >= 0 && prio < haptic_prio)
+        return;
+    memcpy(haptic_pat, segs, n * sizeof(*segs));
+    haptic_len = n;
+    haptic_idx = 0;
+    haptic_prio = prio;
+    haptic_seg_end = ms_now() + segs[0].ms;
+    haptic_set(segs[0].level);
+}
+
+static void haptic_update(void)
+{
+    if (haptic_idx < 0)
+        return;
+    int64_t t = ms_now();
+    while (haptic_idx >= 0 && t >= haptic_seg_end)
+    {
+        if (++haptic_idx >= haptic_len)
+        {
+            haptic_idx = -1;
+            haptic_set(0);
+            return;
+        }
+        // Timed from now, not from the previous segment's planned end: the
+        // check runs once per tic (28 ms), and a late segment would
+        // otherwise shrink or vanish.
+        haptic_seg_end = t + haptic_pat[haptic_idx].ms;
+        haptic_set(haptic_pat[haptic_idx].level);
+    }
+}
+
+// Hits are recorded here, during the game tick, and played from
+// haptic_watch_player at the next tic: a hitscan hit lands in the same tic
+// as its muzzle flash, so the two become one pattern (blip, gap, tick)
+// instead of the blip overwriting the tick.
+static int pending_hit;   // 0 none, 1 hit, 2 kill
+
+void I_HapticHit(int damage, int killed)
+{
+    int h = killed ? 2 : 1;
+    if (h > pending_hit)
+        pending_hit = h;
+}
+
+static void haptic_watch_player(void)
+{
+    static const void *prev_flash;
+    static int prev_damage;
+
+    if (gamestate != GS_LEVEL || menuactive)
+    {
+        prev_flash = NULL;
+        prev_damage = 0;
+        pending_hit = 0;
+        if (haptic_idx >= 0 && menuactive)
+        {
+            haptic_idx = -1;
+            haptic_set(0);
+        }
+        return;
+    }
+
+    player_t *p = &players[consoleplayer];
+
+    // A muzzle flash starting means a shot went off (fists and the
+    // chainsaw have no flash; their hits still tick via I_HapticHit).
+    const void *flash = p->psprites[ps_flash].state;
+    const haptic_seg_t tick = {pending_hit == 2 ? 200 : 120, pending_hit == 2 ? 45 : 25};
+    if (flash && !prev_flash)
+    {
+        bool heavy = p->readyweapon == wp_shotgun || p->readyweapon == wp_supershotgun ||
+                     p->readyweapon == wp_missile || p->readyweapon == wp_bfg;
+        const haptic_seg_t pat[] = {{heavy ? 220 : 150, heavy ? 70 : 35}, {0, 30}, tick};
+        haptic_play(PRIO_FIRE, pat, pending_hit ? 3 : 1);
+    }
+    else if (pending_hit)
+    {
+        // Melee, or a projectile landing later
+        haptic_play(PRIO_HIT, &tick, 1);
+    }
+    pending_hit = 0;
+    prev_flash = flash;
+
+    // damagecount rises by the damage taken and decays by one per tic
+    if (p->damagecount > prev_damage)
+    {
+        int dmg = p->damagecount - prev_damage;
+        int first = 60 + dmg * 3;
+        if (first > 250)
+            first = 250;
+        const haptic_seg_t pulse[] = {{230, first}, {0, 60}, {160, 80}};
+        haptic_play(PRIO_HURT, pulse, 3);
+    }
+    prev_damage = p->damagecount;
+}
+
 // ---- Input ----------------------------------------------------------------
 //
 // In game:   tilt = move/turn, touch screen = fire,
@@ -476,6 +613,9 @@ void I_StartTic(void)
             analog_forward = (int)(TILT_MOVE_SIGN * tilt_axis(in.ay - neutral_y) * TILT_MAX_MOVE);
         }
     }
+
+    haptic_watch_player();
+    haptic_update();
 }
 
 void I_Init(void)

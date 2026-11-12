@@ -9,7 +9,7 @@ Each project is a self-contained ESP-IDF project in its own directory.
 
 | project | what it is | status |
 |---|---|---|
-| [`doom/`](doom/) | PrBoom with shareware DOOM1.WAD, tilt to move, touch to fire | builds and plays in QEMU; not yet run on a Core2 |
+| [`doom/`](doom/) | PrBoom with shareware DOOM1.WAD: tilt to move, touch to fire, vibration on shots, hits and damage | builds and plays in QEMU; not yet run on a Core2 |
 
 ## Toolchain
 

@@ -15,23 +15,27 @@ and speaker code is untested and the tilt settings are guesses.
 |---|---|
 | `components/prboom/` | the engine, copied from retro-go's `prboom-go/components/prboom` at commit `4ced120` |
 | `main/doom_main.c` | the platform layer (the `I_*` functions the engine calls): video, sound, music, input, boot |
-| `main/m5_hal.cpp` | a C wrapper over M5Stack's M5Unified library for the display, touch panel, IMU and speaker |
+| `main/m5_hal.cpp` | a C wrapper over M5Stack's M5Unified library for the display, touch panel, IMU, speaker and vibration motor |
 | `main/qemu_hal.c` | the same interface for QEMU: a virtual display, discarded audio and a scripted input sequence |
 | `tools/qemu_run.py` | builds the QEMU variant, boots it and saves a screenshot at each point the script marks |
 | `sdkconfig.qemu` | the settings the QEMU variant layers on `sdkconfig.defaults` |
 | `wads/DOOM1.WAD` | the shareware game data file (IWAD), packed into the `wads` flash partition at build time |
 | `partitions.csv` | 3 MB app, 12 MB read-only WAD partition, 960 KB wear-levelled save partition |
 
-## Engine change
+## Engine changes
 
-The engine differs from retro-go's copy in one place. PrBoom's joystick
-input is digital: any deflection turns or moves at full speed. To make tilt
-proportional, `g_game.c` gains two globals, `analog_turn` (in the engine's
-turn units, positive turns left) and `analog_forward` (forward-move units,
-positive moves forward). `doom_main.c` sets them from the accelerometer every
-game tick, and `G_BuildTiccmd` adds them to the turn and forward movement of
-the player's command for that tick. The changed lines are marked `m5:` in
-`g_game.c` and `g_game.h`.
+The engine differs from retro-go's copy in two places, both marked `m5:`.
+
+- **Analog movement** (`g_game.c`, `g_game.h`). PrBoom's joystick input is
+  digital: any deflection turns or moves at full speed. To make tilt
+  proportional, `g_game.c` gains two globals, `analog_turn` (in the engine's
+  turn units, positive turns left) and `analog_forward` (forward-move units,
+  positive moves forward). `doom_main.c` sets them from the accelerometer
+  every game tick, and `G_BuildTiccmd` adds them to the turn and forward
+  movement of the player's command for that tick.
+- **Hit callback** (`p_inter.c`, `i_system.h`). `P_DamageMobj` calls
+  `I_HapticHit(damage, killed)` when the local player damages something, so
+  the platform layer can buzz the motor on a hit.
 
 ## Build and flash
 
@@ -69,14 +73,18 @@ python tools/qemu_run.py
 ```
 
 It builds into `build-qemu/`, boots the image and plays a script: open the
-menu, start E1M1 on Hurt Me Plenty, tilt to walk, touch to fire, tilt to
-turn, switch weapon, open and close the automap, open the menu with a C hold
-and move down it. At each marked point the firmware freezes and the harness
+menu, start E1M1 on Hurt Me Plenty, spawn a zombieman ahead and shoot it,
+tilt to walk, touch to fire, tilt to turn, take 15 points of damage, switch
+weapon, open and close the automap, open the menu with a C hold and move
+down it. The zombieman and the damage are test injections that only the QEMU
+build has; they exist so the hit and hurt vibration patterns run every time.
+The vibration motor is logged as `VIB <level>` lines in
+`build-qemu/run/serial.log`. At each marked point the firmware freezes and the harness
 saves a PNG to `build-qemu/run/`. It exits 0 when the script finishes and
 non-zero on a crash or a timeout. The frame rate it prints is the
 emulator's, not the Core2's.
 
-![Ten screenshots from a QEMU run, from the title screen to the in-game menu](docs/qemu-session.png)
+![Thirteen screenshots from a QEMU run, from the title screen to the in-game menu](docs/qemu-session.png)
 
 ## Controls
 
@@ -120,6 +128,16 @@ work; that is untested.
   channel 0. Music defaults to volume 8 of 15 and is not rendered at all at
   0. If the frame rate suffers, try music volume 0 first: rendering runs on
   the other core, but both cores share the bus to PSRAM and flash.
+- **Vibration.** The motor plays short patterns from the game thread: a
+  35 ms blip when a weapon fires (70 ms and stronger for the shotgun, rocket
+  launcher and BFG), a tick 30 ms after the blip when the shot lands (longer
+  and stronger on a kill), and a pulse, pause and second pulse when the
+  player is hurt, the first pulse lengthening with the damage up to 250 ms.
+  Being hurt overrides firing, which overrides a hit. Shots are detected by
+  the weapon's muzzle flash starting, hurt by the engine's damage counter,
+  hits by `I_HapticHit`. The pattern advances once per game tick, so timings
+  round up to the next 28 ms. Fists and the chainsaw have no muzzle flash;
+  they buzz only when they connect. The pattern stops when a menu opens.
 - **Cores.** The game loop owns core 0. M5Unified's speaker task and the music
   renderer run on core 1. The task watchdog is off because the game loop
   never idles.

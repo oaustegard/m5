@@ -34,6 +34,10 @@ void hal_display_text(const char *msg);
 
 void hal_input_read(hal_input_t *in);
 
+// Vibration motor strength, 0 = off. Applies immediately; timing is the
+// caller's job.
+void hal_vibrate(uint8_t level);
+
 // Doom sound effects are unsigned 8-bit mono.
 bool hal_sfx_play(int channel, const uint8_t *data, size_t len, uint32_t rate, uint8_t volume);
 void hal_sfx_volume(int channel, uint8_t volume);

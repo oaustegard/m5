@@ -44,4 +44,7 @@ void I_uSleep(unsigned long usecs);
 const char *I_DoomExeDir(void); // killough 2/16/98: path to executable's dir
 const char* I_SigString(char* buf, size_t sz, int signum);
 
+// m5: called when the local player damages another mobj (haptics)
+void I_HapticHit(int damage, int killed);
+
 #endif

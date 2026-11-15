@@ -1,0 +1,15 @@
+name = "muninn-pager"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Fill in with the scheduled task's id (trig_...) once its API trigger exists.
+[vars]
+ROUTINE_ID = ""
+
+[[durable_objects.bindings]]
+name = "PAGER"
+class_name = "Pager"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Pager"]

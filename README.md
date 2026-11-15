@@ -5,11 +5,12 @@ at 240 MHz with 16 MB flash, 8 MB PSRAM, a 320×240 ILI9342C screen, a
 capacitive touch panel (whose three circles under the screen act as buttons A,
 B and C), an MPU6886 IMU and an I2S speaker.
 
-Each project is a self-contained ESP-IDF project in its own directory.
+Each project is self-contained in its own directory. Firmware is ESP-IDF; `pager/` also has a Cloudflare Worker.
 
 | project | what it is | status |
 |---|---|---|
 | [`doom/`](doom/) | PrBoom with shareware DOOM1.WAD: tilt to move, touch to fire, vibration on shots, hits and damage | builds and plays in QEMU; not yet run on a Core2 |
+| [`pager/`](pager/) | The Core2 as a pager for Muninn: a button press starts a Claude Code session, and session state and yes/no questions come back to the screen | Cloudflare Worker deployed and tested; firmware not started |
 
 ## Toolchain
 

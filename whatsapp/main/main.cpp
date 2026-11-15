@@ -977,6 +977,18 @@ extern "C" void app_main(void) {
         store_save(NULL, &store);
     }
     if (!store.paired) keys_wipe();  // a new identity starts with no sessions or prekeys
+    // Paired, but the key partition has no prekeys: it was erased (another
+    // firmware's data partition overlaps "wakeys"). The server still holds
+    // prekeys whose private halves are gone, so start over with a new link.
+    uint8_t probe[4];
+    if (store.paired && keys_ok && kv_get(NULL, "pk", probe, sizeof probe) == 0) {
+        ESP_LOGW(TAG, "paired but the Signal key store is empty; unlinking");
+        wa_store_init(&store);
+        store_save(NULL, &store);
+        keys_wipe();
+        screen("Keys lost", "Link the Core2 again", "WhatsApp > Linked devices", TFT_ORANGE);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
 
     ws_queue = xQueueCreate(128, sizeof(ws_event));
     wa_callbacks cb = {ws_send, on_event, store_save, now_ms, unix_time, log_cb, NULL, {kv_get, kv_set, kv_del, NULL}};

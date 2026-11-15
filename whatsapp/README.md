@@ -14,7 +14,7 @@ that use unofficial clients, so link a spare number rather than your own.
 | pairing (`pair-success`, device signature) and login | works: paired with an iPhone from the host build, re-login reached `<success>` |
 | prekey upload, receiving and decrypting messages (Signal sessions) | works on the Core2: paired with an iPhone and decrypted live messages (2026-11-15) |
 | ESP-IDF app: WiFi setup (over USB serial or a setup network), WebSocket, QR on screen, store in NVS | works on the Core2 |
-| sending 1:1 text messages | written: tested on the host against whatsmeow's libsignal (`host/sigpeer`) and a scripted server; not yet tried against WhatsApp's servers. Groups are not supported |
+| sending 1:1 text messages | works on the Core2: replies to yourself and to another person delivered (2026-11-15). Groups are not supported |
 
 ## Layout
 

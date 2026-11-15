@@ -254,6 +254,10 @@ static void ws_start(void) {
         cfg.network_timeout_ms = 20000;
         cfg.disable_auto_reconnect = true;  // the main loop decides when to reconnect
         cfg.disable_pingpong_discon = true; // WhatsApp does not answer WebSocket pings
+        // No WebSocket-level pings: the server's PONG reaches WEBSOCKET_EVENT_DATA as
+        // raw frame bytes (8a 00) tagged op_code 2, which desyncs the WhatsApp frame
+        // stream. The core's own <iq xmlns="w:p"> keepalive holds the connection open.
+        cfg.ping_interval_sec = 7 * 24 * 3600;
         ws = esp_websocket_client_init(&cfg);
         esp_websocket_register_events(ws, WEBSOCKET_EVENT_ANY, ws_handler, NULL);
     }

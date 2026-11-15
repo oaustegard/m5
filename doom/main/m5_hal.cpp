@@ -3,6 +3,7 @@
 
 #include <M5Unified.h>
 #include <esp_heap_caps.h>
+#include <stdio.h>
 
 // The frame goes out in horizontal bands through two DMA buffers: one is
 // converted from palette indices while the other is on the SPI bus.
@@ -20,7 +21,10 @@ extern "C" void hal_init(void)
     cfg.internal_mic = false;   // shares the I2S peripheral with the speaker
     M5.begin(cfg);
 
-    M5.Display.setRotation(1);
+    // M5Unified's default rotation for the Core2 is already 320x240
+    // landscape; setRotation(1) turned the picture 90 degrees.
+    printf("m5: display rotation %d, %dx%d\n", (int)M5.Display.getRotation(),
+           (int)M5.Display.width(), (int)M5.Display.height());
     M5.Display.fillScreen(TFT_BLACK);
 
     auto spk = M5.Speaker.config();

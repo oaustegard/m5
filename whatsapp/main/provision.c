@@ -52,8 +52,8 @@ static const char FORM[] =
     "input{display:block;width:100%;font-size:1.1em;margin:.3em 0 1em;padding:.4em}"
     "button{font-size:1.1em;padding:.5em 1.5em}</style>"
     "<h2>WiFi for the Core2</h2><form method=post action=/save>"
-    "<label>Network name<input name=ssid autocapitalize=none required></label>"
-    "<label>Password<input name=pass type=password></label>"
+    "<label>Network name<input name=ssid autocapitalize=none autocorrect=off spellcheck=false required></label>"
+    "<label>Password<input name=pass type=password autocapitalize=none autocorrect=off spellcheck=false></label>"
     "<button>Save and restart</button></form>";
 
 static esp_err_t get_root(httpd_req_t *req) {
@@ -79,7 +79,7 @@ static void url_decode(char *s) {
 }
 
 static esp_err_t post_save(httpd_req_t *req) {
-    char body[256] = {0};
+    char body[512] = {0};
     int len = req->content_len < (int)sizeof body - 1 ? req->content_len : (int)sizeof body - 1;
     int got = 0;
     while (got < len) {
@@ -87,14 +87,24 @@ static esp_err_t post_save(httpd_req_t *req) {
         if (r <= 0) return ESP_FAIL;
         got += r;
     }
-    char ssid[33] = {0}, pass[65] = {0};
-    if (httpd_query_key_value(body, "ssid", ssid, sizeof ssid) != ESP_OK) {
+    // The values arrive URL-encoded, up to three bytes per character, so the
+    // buffers are sized for that; a truncated password must not be saved.
+    char ssid[3 * 32 + 1] = {0}, pass[3 * 64 + 1] = {0};
+    if (httpd_query_key_value(body, "ssid", ssid, sizeof ssid) != ESP_OK || !ssid[0]) {
         httpd_resp_send(req, "missing network name", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
-    httpd_query_key_value(body, "pass", pass, sizeof pass);
+    esp_err_t pe = httpd_query_key_value(body, "pass", pass, sizeof pass);
+    if (pe != ESP_OK && pe != ESP_ERR_NOT_FOUND) {
+        httpd_resp_send(req, "password too long", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
     url_decode(ssid);
     url_decode(pass);
+    if (strlen(ssid) > 32 || strlen(pass) > 64) {
+        httpd_resp_send(req, "network name or password too long", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
     save_creds(ssid, pass);
     httpd_resp_send(req, "Saved. The Core2 is restarting and will join your network.", HTTPD_RESP_USE_STRLEN);
     vTaskDelay(pdMS_TO_TICKS(1500));

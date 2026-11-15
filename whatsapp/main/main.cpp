@@ -340,8 +340,34 @@ static void on_event(void *, const wa_event *ev) {
 static EventGroupHandle_t net_events;
 #define NET_UP BIT0
 
-static void wifi_handler(void *, esp_event_base_t base, int32_t id, void *) {
+static volatile int wifi_reason;  // last disconnect reason, 0 if none yet
+
+// What a disconnect reason means for the person holding the device.
+static const char *wifi_reason_text(int r) {
+    switch (r) {
+        case WIFI_REASON_NO_AP_FOUND:
+            return "network not found (2.4 GHz only)";
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_MIC_FAILURE:
+        case WIFI_REASON_CONNECTION_FAIL:
+            return "wrong password?";
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+            return "unsupported security mode";
+        case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+            return "signal too weak";
+        default:
+            return nullptr;
+    }
+}
+
+static void wifi_handler(void *, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        auto *e = (wifi_event_sta_disconnected_t *)data;
+        if (e->reason != wifi_reason) ESP_LOGW(TAG, "wifi disconnected, reason %d", e->reason);
+        wifi_reason = e->reason;
         xEventGroupClearBits(net_events, NET_UP);
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -410,8 +436,15 @@ extern "C" void app_main(void) {
             esp_restart();
         }
         if (esp_timer_get_time() > deadline) {
-            screen("Can't join WiFi", ssid, "hold A 3 s to change network", TFT_ORANGE);
-            deadline = INT64_MAX;
+            char why[48];
+            const char *t = wifi_reason_text(wifi_reason);
+            if (t) {
+                snprintf(why, sizeof why, "%s: %s", ssid, t);
+            } else {
+                snprintf(why, sizeof why, "%s (reason %d)", ssid, wifi_reason);
+            }
+            screen("Can't join WiFi", why, "hold A 3 s to change network", TFT_ORANGE);
+            deadline = esp_timer_get_time() + 10 * 1000000LL;  // refresh as the reason changes
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }

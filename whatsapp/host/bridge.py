@@ -5,7 +5,7 @@ Owns the WebSocket (through HTTPS_PROXY if set) and relays it to ./wa-host
 over stdin/stdout. Prints the core's log; renders each QR payload to
 qr.png and qr.txt next to the store so a phone can scan it.
 
-    python3 bridge.py [--store wa-store.bin] [--quit-after-login] [--max-runs N]
+    python3 bridge.py [--store wa-store.bin] [--quit-after-login] [--max-runs N] [--send JID TEXT]
 """
 import argparse
 import asyncio
@@ -55,6 +55,8 @@ async def run(args):
     cmd = [os.path.join(HERE, "wa-host"), "--store", args.store]
     if args.quit_after_login:
         cmd.append("--quit-after-login")
+    if args.send:
+        cmd += ["--send", args.send[0], args.send[1]]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -130,6 +132,7 @@ def main():
     p.add_argument("--store", default=os.path.join(HERE, "wa-store.bin"))
     p.add_argument("--quit-after-login", action="store_true")
     p.add_argument("--max-runs", type=int, default=3)
+    p.add_argument("--send", nargs=2, metavar=("JID", "TEXT"), help="send one text message after login")
     asyncio.run(run(p.parse_args()))
 
 

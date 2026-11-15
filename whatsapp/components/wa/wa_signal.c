@@ -27,7 +27,7 @@
 #define SK_STATES 5  // libsignal groups maxStates
 #define SK_SKIPPED 8
 
-#define REC_MAGIC 0x57615331u  // "WaS1"
+#define REC_MAGIC 0x57615332u  // "WaS2" (WaS1 had no pending prekey fields)
 #define SK_MAGIC 0x57614731u   // "WaG1"
 #define PK_MAGIC 0x57615031u   // "WaP1"
 
@@ -69,8 +69,12 @@ typedef struct {
     uint8_t send_priv[32], send_pub[32], send_ck[32];
     uint32_t send_idx;
     uint32_t prev_counter;
-    uint8_t base_key[32];  // their base key from the prekey message that made this state
+    uint8_t base_key[32];  // the X3DH base key: theirs if they started the session, ours if we did
     uint32_t remote_reg;
+    // We started this session (wa_sig_process_bundle) and have not heard back:
+    // every message we send is wrapped in a PreKeySignalMessage until then.
+    uint8_t pending, pending_has_opk;
+    uint32_t pending_opk_id, pending_spk_id;
     sig_chain chains[RCHAINS];  // newest last, as libsignal appends
     sig_mkey keys[SKIPPED];     // oldest first
 } sig_state;
@@ -316,6 +320,7 @@ static int state_decrypt(const wa_sig *s, sig_state *st, const signal_msg *m, ui
     signal_mac(mkey, st->remote_ident, s->store->ident_pub, m->body, m->body_len, mac);
     if (!wa_ct_equal(mac, m->mac, MAC_LEN)) return WA_SIG_ERR_BAD_MAC;
     if (wa_aes_cbc_decrypt(ckey, iv, m->ct, m->ct_len, out, outlen)) return WA_SIG_ERR_BAD_MAC;
+    st->pending = 0;  // ClearUnackPreKeyMessage: they have the session now
     return WA_SIG_OK;
 }
 
@@ -497,15 +502,91 @@ done:
 
 // ---------------------------------------------------------------- session encrypt
 
-int wa_sig_encrypt(wa_sig *s, const char *addr, const uint8_t *in, size_t len, uint8_t **out, size_t *outlen) {
+int wa_sig_has_session(wa_sig *s, const char *addr) {
+    char key[16];
+    uint8_t hash[32];
+    kv_key('s', addr, NULL, key, hash);
+    sig_record *r = malloc(sizeof *r);
+    if (!r) return WA_SIG_ERR_NOMEM;
+    int rc = kv_load(s, key, r, sizeof *r, REC_MAGIC, hash);
+    if (rc > 0) rc = r->cur.used ? 1 : 0;
+    free(r);
+    return rc;
+}
+
+// SessionBuilder.ProcessBundle + Ratchet.CalculateSenderSession: X3DH from
+// the sending side. The new state becomes current; the old one is archived.
+int wa_sig_process_bundle(wa_sig *s, const char *addr, const wa_prekey_bundle *b) {
+    uint8_t spk_ser[33];
+    serialize_key(b->spk, spk_ser);
+    if (!wa_curve_verify(b->ident, spk_ser, 33, b->spk_sig)) return WA_SIG_ERR_BAD_MAC;
+    wa_store *st = s->store;
+    uint8_t base_priv[32], base_pub[32], rat_priv[32], rat_pub[32];
+    if (wa_x25519_keypair(base_priv, base_pub) || wa_x25519_keypair(rat_priv, rat_pub)) return WA_SIG_ERR_INVALID;
+    // The mirror of process_prekey: DH(our identity, their signed prekey),
+    // DH(our base, their identity), DH(our base, their signed prekey),
+    // [DH(our base, their one-time prekey)].
+    uint8_t master[32 * 5];
+    memset(master, 0xFF, 32);
+    if (wa_x25519(master + 32, st->ident_priv, b->spk) || wa_x25519(master + 64, base_priv, b->ident) ||
+        wa_x25519(master + 96, base_priv, b->spk) || (b->has_opk && wa_x25519(master + 128, base_priv, b->opk)))
+        return WA_SIG_ERR_INVALID;
+    static const uint8_t info[] = "WhisperText";
+    uint8_t derived[64], root[32], send_ck[32];
+    wa_hkdf_sha256(NULL, 0, master, b->has_opk ? 160 : 128, info, sizeof info - 1, derived, 64);
+    // Their first sending chain is keyed by their signed prekey; ours starts
+    // with a fresh ratchet key one root step on.
+    if (create_chain(derived, rat_priv, b->spk, root, send_ck)) return WA_SIG_ERR_INVALID;
+
+    char key[16];
+    uint8_t hash[32];
+    kv_key('s', addr, NULL, key, hash);
+    sig_record *r = malloc(sizeof *r);
+    if (!r) return WA_SIG_ERR_NOMEM;
+    int rc = kv_load(s, key, r, sizeof *r, REC_MAGIC, hash);
+    if (rc < 0) {
+        free(r);
+        return rc;
+    }
+    r->magic = REC_MAGIC;
+    memcpy(r->addr_hash, hash, 32);
+    if (r->cur.used) {
+        memmove(&r->prev[1], &r->prev[0], sizeof r->prev[0] * (PREV_STATES - 1));
+        r->prev[0] = r->cur;
+    }
+    sig_state *n = &r->cur;
+    memset(n, 0, sizeof *n);
+    n->used = 1;
+    memcpy(n->remote_ident, b->ident, 32);
+    memcpy(n->root, root, 32);
+    memcpy(n->send_priv, rat_priv, 32);
+    memcpy(n->send_pub, rat_pub, 32);
+    memcpy(n->send_ck, send_ck, 32);
+    n->nchains = 1;
+    memcpy(n->chains[0].ratchet, b->spk, 32);
+    memcpy(n->chains[0].ck, derived + 32, 32);
+    memcpy(n->base_key, base_pub, 32);
+    n->remote_reg = b->reg_id;
+    n->pending = 1;
+    n->pending_has_opk = b->has_opk;
+    n->pending_opk_id = b->opk_id;
+    n->pending_spk_id = b->spk_id;
+    rc = kv_save(s, key, r, sizeof *r);
+    free(r);
+    return rc;
+}
+
+int wa_sig_encrypt(wa_sig *s, const char *addr, const uint8_t *in, size_t len, uint8_t **out, size_t *outlen,
+                   bool *prekey) {
     *out = NULL;
     *outlen = 0;
+    if (prekey) *prekey = false;
     char key[16];
     uint8_t hash[32];
     kv_key('s', addr, NULL, key, hash);
     sig_record *r = malloc(sizeof *r);
     uint8_t *ct = malloc(len + 16);
-    wa_buf pb = {0};
+    wa_buf pb = {0}, pk = {0};
     if (!r || !ct) {
         free(r);
         free(ct);
@@ -541,15 +622,40 @@ int wa_sig_encrypt(wa_sig *s, const char *addr, const uint8_t *in, size_t len, u
         rc = WA_SIG_ERR_NOMEM;
         goto done;
     }
+    if (st->pending) {
+        // PreKeySignalMessage { preKeyId=1, baseKey=2, identityKey=3, message=4, registrationId=5, signedPreKeyId=6 }
+        uint8_t bk[33], ik[33];
+        serialize_key(st->base_key, bk);
+        serialize_key(s->store->ident_pub, ik);
+        wa_buf_byte(&pk, VERSION_BYTE);
+        if (st->pending_has_opk) wa_pb_varint(&pk, 1, st->pending_opk_id);
+        wa_pb_bytes(&pk, 2, bk, 33);
+        wa_pb_bytes(&pk, 3, ik, 33);
+        wa_pb_bytes(&pk, 4, pb.data, pb.len);
+        wa_pb_varint(&pk, 5, s->store->reg_id);
+        wa_pb_varint(&pk, 6, st->pending_spk_id);
+        if (pk.oom) {
+            rc = WA_SIG_ERR_NOMEM;
+            goto done;
+        }
+    }
     hmac1(st->send_ck, 2, st->send_ck);
     st->send_idx++;
     rc = kv_save(s, key, r, sizeof *r);
     if (rc) goto done;
-    *out = pb.data;
-    *outlen = pb.len;
-    pb.data = NULL;
+    if (st->pending) {
+        *out = pk.data;
+        *outlen = pk.len;
+        pk.data = NULL;
+        if (prekey) *prekey = true;
+    } else {
+        *out = pb.data;
+        *outlen = pb.len;
+        pb.data = NULL;
+    }
 done:
     wa_buf_free(&pb);
+    wa_buf_free(&pk);
     free(ct);
     free(r);
     return rc;

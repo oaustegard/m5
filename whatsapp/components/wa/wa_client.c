@@ -599,8 +599,11 @@ static void handle_node(wa_client *c, const wa_node *n) {
             const char *id = wa_attr_str(n, "id");
             return send_iq_result(c, id ? id : "", NULL);
         }
-        if (type && (strcmp(type, "result") == 0 || strcmp(type, "error") == 0) && wa__handle_iq_response(c, n))
+        if (type && (strcmp(type, "result") == 0 || strcmp(type, "error") == 0) &&
+            (wa__send_handle_iq(c, n) || wa__handle_iq_response(c, n)))
             return;
+    } else if (strcmp(n->tag, "ack") == 0) {
+        if (wa__handle_ack(c, n)) return;
     } else if (strcmp(n->tag, "message") == 0) {
         if (wa__handle_message(c, n)) return;
     } else if (strcmp(n->tag, "notification") == 0) {
@@ -737,6 +740,7 @@ void wa_client_tick(wa_client *c) {
         wa_client_send_node(c, &iq);
         c->next_ping_ms = now + 20000 + (now % 10000);
     }
+    wa__send_tick(c, now);
 }
 
 void wa_client_init(wa_client *c, wa_store *s, const wa_callbacks *cb) {
@@ -751,9 +755,13 @@ void wa_client_init(wa_client *c, wa_store *s, const wa_callbacks *cb) {
 void wa_client_on_close(wa_client *c) {
     c->state = WA_S_CLOSED;
     c->in_len = 0;
+    c->logged_in = false;
+    wa__send_abort(c, "connection closed");
 }
 
 void wa_client_free(wa_client *c) {
+    free(c->out.text);
+    c->out.text = NULL;
     free(c->in);
     c->in = NULL;
     c->in_cap = c->in_len = 0;

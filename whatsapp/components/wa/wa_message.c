@@ -349,6 +349,12 @@ static int parse_source(wa_client *c, const wa_node *n, msg_source *src) {
         src->chat_jid = &src->chat_nonad;
         if (strcmp(from->server, "lid") != 0) alt = wa_attr_jid(n, "sender_lid");
     }
+    // Remember phone number <-> LID pairs for sending (wa_send.c).
+    if (alt && strcmp(src->sender_jid->server, "s.whatsapp.net") == 0 && strcmp(alt->server, "lid") == 0)
+        wa__lid_learn(c, src->sender_jid->user, alt->user);
+    const wa_jid *pn = wa_attr_jid(n, src->is_group ? "participant_pn" : "sender_pn");
+    if (pn && strcmp(src->sender_jid->server, "lid") == 0 && strcmp(pn->server, "s.whatsapp.net") == 0)
+        wa__lid_learn(c, pn->user, src->sender_jid->user);
     src->enc = *src->sender_jid;
     if (strcmp(src->sender_jid->server, "s.whatsapp.net") == 0 && alt && strcmp(alt->server, "lid") == 0) {
         src->enc = *alt;

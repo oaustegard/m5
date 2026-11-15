@@ -5,7 +5,7 @@ MBEDTLS ?= /tmp/jail/mbedtls
 WA = ../components/wa
 CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
 CFLAGS += -I$(WA) -I$(WA)/include -I$(MBEDTLS)/include
-SRCS = main.c $(WA)/wa_client.c $(WA)/wa_message.c $(WA)/wa_signal.c $(WA)/wa_binary.c $(WA)/wa_tokens.c $(WA)/wa_pb.c $(WA)/wa_crypto.c \
+SRCS = main.c $(WA)/wa_client.c $(WA)/wa_message.c $(WA)/wa_send.c $(WA)/wa_signal.c $(WA)/wa_binary.c $(WA)/wa_tokens.c $(WA)/wa_pb.c $(WA)/wa_crypto.c \
        $(WA)/third_party/monocypher.c $(WA)/third_party/monocypher-ed25519.c
 LIBS = $(MBEDTLS)/library/libmbedcrypto.a -lz
 
@@ -14,7 +14,7 @@ all: wa-host test-wa
 wa-host: $(SRCS) $(wildcard $(WA)/*.h) $(WA)/include/wa.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LIBS)
 
-TEST_SRCS = test_wa.c $(WA)/wa_client.c $(WA)/wa_message.c $(WA)/wa_signal.c $(WA)/wa_binary.c $(WA)/wa_tokens.c $(WA)/wa_pb.c $(WA)/wa_crypto.c \
+TEST_SRCS = test_wa.c $(WA)/wa_client.c $(WA)/wa_message.c $(WA)/wa_send.c $(WA)/wa_signal.c $(WA)/wa_binary.c $(WA)/wa_tokens.c $(WA)/wa_pb.c $(WA)/wa_crypto.c \
             $(WA)/third_party/monocypher.c $(WA)/third_party/monocypher-ed25519.c
 
 test-wa: $(TEST_SRCS) $(wildcard $(WA)/*.h)

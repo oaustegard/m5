@@ -14,3 +14,10 @@ bool wa__handle_notification(wa_client *c, const wa_node *n);
 bool wa__handle_iq_response(wa_client *c, const wa_node *n);
 // <ack class=tag id to=from [participant] [recipient] [type] [error]>
 void wa__send_ack(wa_client *c, const wa_node *n, int error);
+
+// wa_send.c
+bool wa__send_handle_iq(wa_client *c, const wa_node *n);  // true if it was a send's request
+bool wa__handle_ack(wa_client *c, const wa_node *n);
+void wa__send_tick(wa_client *c, uint64_t now);
+void wa__send_abort(wa_client *c, const char *why);
+void wa__lid_learn(wa_client *c, const char *pn, const char *lid);

@@ -13,6 +13,13 @@
 //	genc <group> <pt>     -> skmsg <ct>              group-encrypt
 //	ident                 -> ident <pub>             Alice's identity key
 //
+// It also plays "Carol", who publishes a bundle for the C side to start a
+// session with (the sending direction):
+//
+//	carol [noopk]         -> bundle <regid> <ident> <spkid> <spk> <spksig> <opkid|-> <opk|->
+//	cdec pkmsg|msg <ct>   -> pt <plaintext>          Carol decrypts from the C side
+//	cenc <plaintext>      -> pkmsg <ct> | msg <ct>   Carol encrypts to the C side
+//
 // Errors answer "err <text>". The process exits at EOF.
 package main
 
@@ -70,6 +77,16 @@ func main() {
 		}
 		return names[group]
 	}
+
+	carolKP, _ := keyhelper.GenerateIdentityKeyPair()
+	carolReg := keyhelper.GenerateRegistrationID()
+	cPrekeys := tests.NewInMemoryPreKey()
+	cSpks := tests.NewInMemorySignedPreKey()
+	cAddr := protocol.NewSignalAddress("c", 1)
+	cBuilder := session.NewBuilder(tests.NewInMemorySession(ser), cPrekeys, cSpks,
+		tests.NewInMemoryIdentityKey(carolKP, carolReg), cAddr, ser)
+	cCipher := session.NewCipher(cBuilder, cAddr)
+	var nextKeyID uint32 = 40
 
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 1<<20), 1<<20)
@@ -153,6 +170,71 @@ func main() {
 					return err
 				}
 				reply("pt %x", pt)
+			case "carol":
+				nextKeyID++
+				spk, err := keyhelper.GenerateSignedPreKey(carolKP, nextKeyID, ser.SignedPreKeyRecord)
+				if err != nil {
+					return err
+				}
+				cSpks.StoreSignedPreKey(ctx, spk.ID(), spk)
+				ik := carolKP.PublicKey().PublicKey().PublicKey()
+				sp := spk.KeyPair().PublicKey().PublicKey()
+				sig := spk.Signature()
+				opk := "- -"
+				if len(f) < 2 || f[1] != "noopk" {
+					nextKeyID++
+					pks, err := keyhelper.GeneratePreKeys(int(nextKeyID), int(nextKeyID), ser.PreKeyRecord)
+					if err != nil {
+						return err
+					}
+					cPrekeys.StorePreKey(ctx, nextKeyID, pks[0])
+					op := pks[0].KeyPair().PublicKey().PublicKey()
+					opk = fmt.Sprintf("%d %x", nextKeyID, op[:])
+				}
+				reply("bundle %d %x %d %x %x %s", carolReg, ik[:], spk.ID(), sp[:], sig[:], opk)
+			case "cdec":
+				if len(f) != 3 {
+					return fmt.Errorf("cdec wants 2 args")
+				}
+				ct, err := hex.DecodeString(f[2])
+				if err != nil {
+					return err
+				}
+				var pt []byte
+				if f[1] == "pkmsg" {
+					m, err := protocol.NewPreKeySignalMessageFromBytes(ct, ser.PreKeySignalMessage, ser.SignalMessage)
+					if err != nil {
+						return err
+					}
+					pt, err = cCipher.DecryptMessage(ctx, m)
+					if err != nil {
+						return err
+					}
+				} else {
+					m, err := protocol.NewSignalMessageFromBytes(ct, ser.SignalMessage)
+					if err != nil {
+						return err
+					}
+					pt, err = cCipher.Decrypt(ctx, m)
+					if err != nil {
+						return err
+					}
+				}
+				reply("pt %x", pt)
+			case "cenc":
+				pt, err := hex.DecodeString(f[1])
+				if err != nil {
+					return err
+				}
+				m, err := cCipher.Encrypt(ctx, pt)
+				if err != nil {
+					return err
+				}
+				t := "msg"
+				if m.Type() == protocol.PREKEY_TYPE {
+					t = "pkmsg"
+				}
+				reply("%s %x", t, m.Serialize())
 			case "skdm":
 				m, err := gbuilder.Create(ctx, nameFor(f[1]))
 				if err != nil {

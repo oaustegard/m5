@@ -348,7 +348,7 @@ static int alice_says(peer *p, wa_sig *s, const char *addr, const char *text, co
 static int bob_says(peer *p, wa_sig *s, const char *addr, const char *text) {
     uint8_t *ct;
     size_t len;
-    int rc = wa_sig_encrypt(s, addr, (const uint8_t *)text, strlen(text), &ct, &len);
+    int rc = wa_sig_encrypt(s, addr, (const uint8_t *)text, strlen(text), &ct, &len, NULL);
     if (rc) return rc;
     char *h = malloc(2 * len + 1);
     hexs(ct, len, h);
@@ -519,11 +519,17 @@ typedef struct {
     wa_client *c;
     uint8_t wkey[32];
     uint32_t wctr;
-    char sent[8][400];  // printed nodes the client sent
+    char sent[16][2048];  // printed nodes the client sent
     int nsent;
+    uint8_t *raw;  // the last node sent, still binary-encoded
+    size_t raw_len;
     char text[256], push[64], chat[96], kind[16];
     int messages, undecryptable;
+    char sent_id[32], send_error[64];
+    int sends_ok, sends_failed;
 } client_probe;
+
+static uint64_t probe_time;
 
 static int probe_send(void *ctx, const uint8_t *data, size_t len) {
     client_probe *pr = ctx;
@@ -536,7 +542,13 @@ static int probe_send(void *ctx, const uint8_t *data, size_t len) {
     if (wa_aes_gcm_decrypt(pr->wkey, iv, NULL, 0, data + 3, fl, plain) == 0) {
         wa_arena a = {0};
         wa_node *n = wa_node_decode(&a, plain + 1, fl - 16 - 1);
-        if (n && pr->nsent < 8) wa_node_print(n, pr->sent[pr->nsent++], sizeof pr->sent[0]);
+        if (n && pr->nsent < 16) wa_node_print(n, pr->sent[pr->nsent++], sizeof pr->sent[0]);
+        if (n) {
+            free(pr->raw);
+            pr->raw_len = fl - 16 - 1;
+            pr->raw = malloc(pr->raw_len);
+            memcpy(pr->raw, plain + 1, pr->raw_len);
+        }
         wa_arena_free(&a);
     }
     free(plain);
@@ -553,10 +565,16 @@ static void probe_event(void *ctx, const wa_event *ev) {
         snprintf(pr->kind, sizeof pr->kind, "%s", ev->msg->kind);
     } else if (ev->type == WA_EV_UNDECRYPTABLE) {
         pr->undecryptable++;
+    } else if (ev->type == WA_EV_SENT) {
+        pr->sends_ok++;
+        snprintf(pr->sent_id, sizeof pr->sent_id, "%s", ev->text);
+    } else if (ev->type == WA_EV_SEND_FAILED) {
+        pr->sends_failed++;
+        snprintf(pr->send_error, sizeof pr->send_error, "%s", ev->text);
     }
 }
 
-static uint64_t probe_now(void *ctx) { return 0; }
+static uint64_t probe_now(void *ctx) { return probe_time; }
 
 // Feed one node to the client as an encrypted frame from the server.
 static void feed_node(wa_client *c, const wa_node *n) {
@@ -663,6 +681,435 @@ static void test_client_messages(void) {
     peer_stop(&p);
 }
 
+// ---------------------------------------------------------------- sending
+
+// Two C identities: A starts a session from B's bundle (the sending side).
+static wa_prekey_bundle bundle_of(const wa_store *st, const wa_prekey_pub *opk) {
+    wa_prekey_bundle b = {0};
+    b.reg_id = st->reg_id;
+    memcpy(b.ident, st->ident_pub, 32);
+    b.spk_id = st->spk_id;
+    memcpy(b.spk, st->spk_pub, 32);
+    memcpy(b.spk_sig, st->spk_sig, 64);
+    if (opk) {
+        b.has_opk = true;
+        b.opk_id = opk->id;
+        memcpy(b.opk, opk->pub, 32);
+    }
+    return b;
+}
+
+static int c_enc(wa_sig *s, const char *addr, const char *text, uint8_t **ct, size_t *len, bool *prekey) {
+    return wa_sig_encrypt(s, addr, (const uint8_t *)text, strlen(text), ct, len, prekey);
+}
+
+static int c_dec_eq(wa_sig *s, const char *addr, bool prekey, const uint8_t *ct, size_t len, const char *want) {
+    uint8_t *pt;
+    size_t ptl;
+    int rc = wa_sig_decrypt(s, addr, prekey, ct, len, &pt, &ptl);
+    if (rc) return rc;
+    int ok = ptl == strlen(want) && memcmp(pt, want, ptl) == 0;
+    free(pt);
+    return ok ? 0 : -100;
+}
+
+static void test_signal_initiator(void) {
+    wa_store a, b;
+    wa_store_init(&a);
+    wa_store_init(&b);
+    mem_kv akv = {0}, bkv = {0};
+    wa_sig as = {&a, {kv_get, kv_set, kv_del, &akv}}, bs = {&b, {kv_get, kv_set, kv_del, &bkv}};
+    const char *AB = "b:3@lid", *BA = "a:7@lid";
+    wa_prekey_pub opk;
+    CHECK(wa_sig_prekeys_generate(&bs, 1, &opk) == 1, "B makes a one-time prekey");
+    CHECK(wa_sig_has_session(&as, AB) == 0, "no session before the bundle");
+
+    wa_prekey_bundle bad = bundle_of(&b, &opk);
+    bad.spk_sig[3] ^= 1;
+    CHECK(wa_sig_process_bundle(&as, AB, &bad) == WA_SIG_ERR_BAD_MAC, "a bundle with a bad signed-prekey signature is refused");
+    CHECK(wa_sig_has_session(&as, AB) == 0, "and makes no session");
+
+    wa_prekey_bundle bb = bundle_of(&b, &opk);
+    CHECK(wa_sig_process_bundle(&as, AB, &bb) == WA_SIG_OK, "A starts a session from B's bundle");
+    CHECK(wa_sig_has_session(&as, AB) == 1, "A has a session");
+
+    uint8_t *ct;
+    size_t len;
+    bool prekey = false;
+    CHECK(c_enc(&as, AB, "first", &ct, &len, &prekey) == 0 && prekey, "A's first message is a prekey message");
+    CHECK(c_dec_eq(&bs, BA, true, ct, len, "first") == 0, "B decrypts it");
+    free(ct);
+    CHECK(c_enc(&as, AB, "second", &ct, &len, &prekey) == 0 && prekey, "still a prekey message before B answers");
+    CHECK(c_dec_eq(&bs, BA, true, ct, len, "second") == 0, "B decrypts the second");
+    free(ct);
+    CHECK(c_enc(&bs, BA, "reply", &ct, &len, &prekey) == 0 && !prekey, "B answers with a normal message");
+    CHECK(c_dec_eq(&as, AB, false, ct, len, "reply") == 0, "A decrypts B's answer");
+    free(ct);
+    CHECK(c_enc(&as, AB, "third", &ct, &len, &prekey) == 0 && !prekey, "after the answer A sends normal messages");
+    CHECK(c_dec_eq(&bs, BA, false, ct, len, "third") == 0, "B decrypts it");
+    free(ct);
+
+    // A bundle without a one-time prekey works too, and replaces the session.
+    wa_prekey_bundle nb = bundle_of(&b, NULL);
+    CHECK(wa_sig_process_bundle(&as, AB, &nb) == WA_SIG_OK, "a bundle without a one-time prekey");
+    CHECK(c_enc(&as, AB, "fresh", &ct, &len, &prekey) == 0 && prekey, "the new session sends a prekey message");
+    CHECK(c_dec_eq(&bs, BA, true, ct, len, "fresh") == 0, "B takes the new session");
+    free(ct);
+    kv_clear(&akv);
+    kv_clear(&bkv);
+}
+
+static wa_prekey_bundle parse_peer_bundle(const char *line, bool *ok) {
+    wa_prekey_bundle b = {0};
+    unsigned reg, spkid;
+    char ik[65], spk[65], sig[129], oid[16], opk[65];
+    *ok = sscanf(line, "bundle %u %64s %u %64s %128s %15s %64s", &reg, ik, &spkid, spk, sig, oid, opk) == 7;
+    if (!*ok) {
+        fprintf(stderr, "  peer said: %.200s\n", line);
+        return b;
+    }
+    b.reg_id = reg;
+    unhex(ik, b.ident);
+    b.spk_id = spkid;
+    unhex(spk, b.spk);
+    unhex(sig, b.spk_sig);
+    if (strcmp(oid, "-") != 0) {
+        b.has_opk = true;
+        b.opk_id = (uint32_t)strtoul(oid, NULL, 10);
+        unhex(opk, b.opk);
+    }
+    return b;
+}
+
+// Encrypt text to Carol (the Go peer) and have her decrypt it.
+static int to_carol(peer *p, wa_sig *s, const char *addr, const char *text, const char *want_type) {
+    uint8_t *ct;
+    size_t len;
+    bool prekey;
+    int rc = c_enc(s, addr, text, &ct, &len, &prekey);
+    if (rc) return rc;
+    const char *type = prekey ? "pkmsg" : "msg";
+    char *h = malloc(2 * len + 1);
+    hexs(ct, len, h);
+    free(ct);
+    const char *r = peer_cmd(p, "cdec %s %s", type, h);
+    free(h);
+    size_t pl;
+    uint8_t *pt = reply_bytes(r, "pt", &pl);
+    int ok = pt && pl == strlen(text) && memcmp(pt, text, pl) == 0 && strcmp(type, want_type) == 0;
+    free(pt);
+    return ok ? 0 : -3;
+}
+
+static void test_signal_initiator_interop(void) {
+    peer p;
+    if (peer_start(&p)) {
+        printf("signal initiator interop: skipped (set WA_SIGPEER)\n");
+        return;
+    }
+    wa_store st;
+    wa_store_init(&st);
+    mem_kv kv = {0};
+    wa_sig s = {&st, {kv_get, kv_set, kv_del, &kv}};
+    const char *C = "carol:1@lid";
+    bool ok;
+    wa_prekey_bundle b = parse_peer_bundle(peer_cmd(&p, "carol"), &ok);
+    CHECK(ok, "peer publishes a bundle");
+    CHECK(wa_sig_process_bundle(&s, C, &b) == WA_SIG_OK, "libsignal's bundle verifies and starts a session");
+    CHECK(to_carol(&p, &s, C, "hello carol", "pkmsg") == 0, "libsignal decrypts our prekey message");
+    CHECK(to_carol(&p, &s, C, "again", "pkmsg") == 0, "and our second, still a prekey message");
+    // Carol answers; that acknowledges the session.
+    char h[64];
+    hexs((const uint8_t *)"hi back", 7, h);
+    size_t cl;
+    uint8_t *ct = reply_bytes(peer_cmd(&p, "cenc %s", h), "msg", &cl);
+    CHECK(ct != NULL, "libsignal answers with a normal message");
+    if (ct) CHECK(c_dec_eq(&s, C, false, ct, cl, "hi back") == 0, "we decrypt libsignal's answer");
+    free(ct);
+    CHECK(to_carol(&p, &s, C, "now plain", "msg") == 0, "after the answer we send normal messages");
+    for (int i = 0; i < 3; i++) CHECK(to_carol(&p, &s, C, "more", "msg") == 0, "chain steps");
+
+    // Without a one-time prekey, to a second address.
+    const char *C2 = "carol:2@lid";
+    b = parse_peer_bundle(peer_cmd(&p, "carol noopk"), &ok);
+    CHECK(ok && !b.has_opk, "peer publishes a bundle without a one-time prekey");
+    CHECK(wa_sig_process_bundle(&s, C2, &b) == WA_SIG_OK && to_carol(&p, &s, C2, "no opk", "pkmsg") == 0,
+          "libsignal decrypts a prekey message without a one-time prekey");
+    kv_clear(&kv);
+    peer_stop(&p);
+}
+
+// A <user jid=...> node of a prekey answer, from a C identity's keys.
+typedef struct {
+    uint8_t reg[4], sid[3], oid[3];
+    wa_node skey_kids[3], key_kids[2], keys_kids[3], kids[4];
+    wa_attr attrs[1];
+} bundle_nodes;
+
+static void be_put(uint32_t v, uint8_t *out, int n) {
+    for (int i = n - 1; i >= 0; i--, v >>= 8) out[i] = (uint8_t)v;
+}
+
+static wa_node bundle_user(bundle_nodes *b, wa_jid jid, const wa_store *st, const wa_prekey_pub *opk, bool wrap) {
+    be_put(st->reg_id, b->reg, 4);
+    be_put(st->spk_id, b->sid, 3);
+    b->skey_kids[0] = (wa_node){"id", NULL, 0, wa_vbytes(b->sid, 3)};
+    b->skey_kids[1] = (wa_node){"value", NULL, 0, wa_vbytes(st->spk_pub, 32)};
+    b->skey_kids[2] = (wa_node){"signature", NULL, 0, wa_vbytes(st->spk_sig, 64)};
+    wa_node *k = wrap ? b->keys_kids : b->kids + 1;
+    size_t nk = 0;
+    k[nk++] = (wa_node){"identity", NULL, 0, wa_vbytes(st->ident_pub, 32)};
+    k[nk++] = (wa_node){"skey", NULL, 0, wa_vlist(b->skey_kids, 3)};
+    if (opk) {
+        be_put(opk->id, b->oid, 3);
+        b->key_kids[0] = (wa_node){"id", NULL, 0, wa_vbytes(b->oid, 3)};
+        b->key_kids[1] = (wa_node){"value", NULL, 0, wa_vbytes(opk->pub, 32)};
+        k[nk++] = (wa_node){"key", NULL, 0, wa_vlist(b->key_kids, 2)};
+    }
+    b->kids[0] = (wa_node){"registration", NULL, 0, wa_vbytes(b->reg, 4)};
+    size_t n = 1 + nk;
+    if (wrap) {
+        b->kids[1] = (wa_node){"keys", NULL, 0, wa_vlist(b->keys_kids, nk)};
+        n = 2;
+    }
+    b->attrs[0] = (wa_attr){"jid", wa_vjid(jid)};
+    return (wa_node){"user", b->attrs, 1, wa_vlist(b->kids, n)};
+}
+
+static void feed_iq_result(wa_client *c, const char *id, wa_node *kids, size_t n) {
+    wa_attr attrs[] = {{"from", wa_vjid(WA_SERVER_JID)}, {"id", wa_vstr(id)}, {"type", wa_vstr("result")}};
+    wa_node iq = {"iq", attrs, 3, wa_vlist(kids, n)};
+    feed_node(c, &iq);
+}
+
+// <usync><list><user jid=...><devices><device-list><device id=.../>...
+typedef struct {
+    wa_attr uattr[1], dattrs[6][2];
+    wa_node devs[6], dl, devices, user;
+} device_user;
+
+static wa_node *device_list(device_user *u, wa_jid jid, const char *const *ids, int n) {
+    for (int i = 0; i < n; i++) {
+        bool hosted = ids[i][0] == 'h';
+        u->dattrs[i][0] = (wa_attr){"id", wa_vstr(hosted ? ids[i] + 1 : ids[i])};
+        u->dattrs[i][1] = (wa_attr){"is_hosted", wa_vstr("true")};
+        u->devs[i] = (wa_node){"device", u->dattrs[i], hosted ? 2 : 1, {0}};
+    }
+    u->dl = (wa_node){"device-list", NULL, 0, wa_vlist(u->devs, (size_t)n)};
+    u->devices = (wa_node){"devices", NULL, 0, wa_vlist(&u->dl, 1)};
+    u->uattr[0] = (wa_attr){"jid", wa_vjid(jid)};
+    u->user = (wa_node){"user", u->uattr, 1, wa_vlist(&u->devices, 1)};
+    return &u->user;
+}
+
+static void feed_usync(wa_client *c, const char *id, wa_node *users, size_t n) {
+    wa_node list = {"list", NULL, 0, wa_vlist(users, n)};
+    wa_node usync = {"usync", NULL, 0, wa_vlist(&list, 1)};
+    feed_iq_result(c, id, &usync, 1);
+}
+
+// Find <to jid=user:device@lid><enc type=...> in the last sent node.
+static const uint8_t *find_enc(client_probe *pr, wa_arena *a, const char *user, int device, const char **type,
+                               size_t *len) {
+    wa_node *m = wa_node_decode(a, pr->raw, pr->raw_len);
+    const wa_node *parts = m ? wa_child(m, "participants") : NULL, *tos;
+    size_t n = parts ? wa_children(parts, &tos) : 0;
+    for (size_t i = 0; i < n; i++) {
+        const wa_jid *j = wa_attr_jid(&tos[i], "jid");
+        const wa_node *enc = wa_child(&tos[i], "enc");
+        if (j && enc && strcmp(j->user, user) == 0 && j->device == device && enc->content.type == WA_V_BYTES) {
+            *type = wa_attr_str(enc, "type");
+            *len = enc->content.bytes.len;
+            return enc->content.bytes.data;
+        }
+    }
+    return NULL;
+}
+
+// Decrypt a participant's <enc> with that device's keys and unpad it.
+static int open_enc(client_probe *pr, wa_sig *s, const char *user, int device, uint8_t **pt, size_t *ptl,
+                    char type[8]) {
+    wa_arena a = {0};
+    const char *t = NULL;
+    size_t len = 0;
+    const uint8_t *ct = find_enc(pr, &a, user, device, &t, &len);
+    int rc = -1;
+    if (ct && t) {
+        snprintf(type, 8, "%s", t);
+        rc = wa_sig_decrypt(s, "me:7@lid", strcmp(t, "pkmsg") == 0, ct, len, pt, ptl);
+        if (rc == 0) {
+            long ul = wa_unpad(*pt, *ptl);
+            if (ul < 0) rc = -2;
+            else *ptl = (size_t)ul;
+        }
+    }
+    wa_arena_free(&a);
+    return rc;
+}
+
+static void test_client_send(void) {
+    wa_store st;
+    wa_store_init(&st);
+    st.paired = true;
+    snprintf(st.user, sizeof st.user, "15550009999");
+    snprintf(st.lid_user, sizeof st.lid_user, "77700009999");
+    st.device = 7;
+    st.account_len = 3;
+    memcpy(st.account, "\x0a\x01\x00", 3);
+    mem_kv kv = {0};
+    static client_probe pr;
+    memset(&pr, 0, sizeof pr);
+    wa_client c;
+    wa_callbacks cb = {probe_send, probe_event, NULL, probe_now, NULL, NULL, &pr, {kv_get, kv_set, kv_del, &kv}};
+    wa_client_init(&c, &st, &cb);
+    c.state = WA_S_OPEN;
+    c.header_sent = true;
+    c.logged_in = true;
+    probe_time = 1000;
+
+    // The other side: their phone (device 0), a companion (3) and our own phone.
+    wa_store them0, them3, mine0;
+    wa_store_init(&them0);
+    wa_store_init(&them3);
+    wa_store_init(&mine0);
+    mem_kv k0 = {0}, k3 = {0}, km = {0};
+    wa_sig s0 = {&them0, {kv_get, kv_set, kv_del, &k0}}, s3 = {&them3, {kv_get, kv_set, kv_del, &k3}},
+           sm = {&mine0, {kv_get, kv_set, kv_del, &km}};
+    wa_prekey_pub opk0;
+    wa_sig_prekeys_generate(&s0, 1, &opk0);
+
+    CHECK(wa_client_send_text(&c, "15550001111:2@s.whatsapp.net", "x") == NULL, "a device JID is refused");
+    CHECK(wa_client_send_text(&c, "123@g.us", "x") == NULL, "groups are not supported yet");
+    const char *id = wa_client_send_text(&c, "15550001111@s.whatsapp.net", "hello from the Core2");
+    CHECK(id && strlen(id) == 22 && strncmp(id, "3EB0", 4) == 0, "send starts with a whatsmeow-style id");
+    char msg_id[32];
+    snprintf(msg_id, sizeof msg_id, "%s", id ? id : "");
+    CHECK(wa_client_send_text(&c, "15550001111@s.whatsapp.net", "x") == NULL, "one send at a time");
+    CHECK(pr.nsent == 1 && strstr(pr.sent[0], "xmlns=\"usync\"") && strstr(pr.sent[0], "<lid") &&
+              strstr(pr.sent[0], "15550001111@s.whatsapp.net"),
+          "a phone number is looked up for its LID first");
+
+    // usync answer: the LID.
+    wa_jid pn = {.user = "15550001111", .server = "s.whatsapp.net"};
+    wa_jid lid = {.user = "88800001111", .server = "lid"};
+    wa_attr lattr[] = {{"val", wa_vjid(lid)}};
+    wa_node lidn = {"lid", lattr, 1, {0}};
+    wa_attr uattr[] = {{"jid", wa_vjid(pn)}};
+    wa_node u = {"user", uattr, 1, wa_vlist(&lidn, 1)};
+    feed_usync(&c, c.out.iq_id, &u, 1);
+    CHECK(pr.nsent == 2 && strstr(pr.sent[1], "context=\"message\"") && strstr(pr.sent[1], "88800001111@lid") &&
+              strstr(pr.sent[1], "77700009999@lid"),
+          "then both device lists, by LID");
+
+    // Devices: theirs 0 and 3; ours 0, 7 (this device) and a hosted 9.
+    static const char *const theirs[] = {"0", "3"}, *const ours[] = {"0", "7", "h9"};
+    device_user du[2];
+    wa_jid own = {.user = "77700009999", .server = "lid"};
+    wa_node users[2] = {*device_list(&du[0], lid, theirs, 2), *device_list(&du[1], own, ours, 3)};
+    feed_usync(&c, c.out.iq_id, users, 2);
+    CHECK(c.out.ndev == 3, "three devices: not ourselves, not hosted");
+    CHECK(pr.nsent == 3 && strstr(pr.sent[2], "xmlns=\"encrypt\"") && strstr(pr.sent[2], "88800001111:3@lid") &&
+              strstr(pr.sent[2], "reason=\"identity\""),
+          "prekeys are fetched for devices without a session");
+
+    // Prekeys: device 0 flat with a one-time key, our phone wrapped in <keys>,
+    // device 3 an error.
+    bundle_nodes bn[2];
+    wa_jid j0 = lid, jm = own, j3 = lid;
+    j3.device = 3;
+    wa_node err = {"error", NULL, 0, {0}};
+    wa_attr e3attr[] = {{"jid", wa_vjid(j3)}};
+    wa_node pk_users[3] = {bundle_user(&bn[0], j0, &them0, &opk0, false), {"user", e3attr, 1, wa_vlist(&err, 1)},
+                           bundle_user(&bn[1], jm, &mine0, NULL, true)};
+    wa_node pklist = {"list", NULL, 0, wa_vlist(pk_users, 3)};
+    feed_iq_result(&c, c.out.iq_id, &pklist, 1);
+    CHECK(pr.nsent == 4 && strstr(pr.sent[3], "<message") && strstr(pr.sent[3], "type=\"text\"") &&
+              strstr(pr.sent[3], "to=\"88800001111@lid\"") &&
+              strstr(pr.sent[3], "peer_recipient_pn=\"15550001111@s.whatsapp.net\"") &&
+              strstr(pr.sent[3], "<device-identity"),
+          "the message goes to the LID, with the phone number and our device identity");
+    if (pr.nsent >= 4) printf("%.300s...\n", pr.sent[3]);
+
+    uint8_t *pt;
+    size_t ptl;
+    char type[8];
+    int rc = open_enc(&pr, &s0, "88800001111", 0, &pt, &ptl, type);
+    CHECK(rc == 0 && strcmp(type, "pkmsg") == 0, "their phone decrypts its prekey message");
+    if (rc == 0) {
+        const uint8_t *conv;
+        size_t cl;
+        CHECK(wa_pb_get_bytes(pt, ptl, 1, &conv, &cl) && cl == 20 && memcmp(conv, "hello from the Core2", 20) == 0,
+              "it is a Message with conversation set");
+        free(pt);
+    }
+    wa_arena a = {0};
+    const char *t;
+    size_t l;
+    CHECK(find_enc(&pr, &a, "88800001111", 3, &t, &l) == NULL, "the device whose prekeys failed is left out");
+    wa_arena_free(&a);
+    rc = open_enc(&pr, &sm, "77700009999", 0, &pt, &ptl, type);
+    CHECK(rc == 0, "our own phone decrypts its copy");
+    if (rc == 0) {
+        const uint8_t *dsm, *dest, *inner, *conv;
+        size_t dl, del, il, cl;
+        CHECK(wa_pb_get_bytes(pt, ptl, 31, &dsm, &dl) && wa_pb_get_bytes(dsm, dl, 1, &dest, &del) &&
+                  del == 15 && memcmp(dest, "88800001111@lid", 15) == 0 && wa_pb_get_bytes(dsm, dl, 2, &inner, &il) &&
+                  wa_pb_get_bytes(inner, il, 1, &conv, &cl) && cl == 20,
+              "our devices get a DeviceSentMessage naming the chat");
+        free(pt);
+    }
+
+    // The server takes it.
+    wa_attr aattrs[] = {{"class", wa_vstr("message")}, {"id", wa_vstr(msg_id)}, {"from", wa_vjid(lid)},
+                        {"t", wa_vstr("1763230000")}};
+    wa_node ack = {"ack", aattrs, 4, {0}};
+    feed_node(&c, &ack);
+    CHECK(pr.sends_ok == 1 && strcmp(pr.sent_id, msg_id) == 0 && c.out.stage == 0, "the ack completes the send");
+
+    // Again: the LID is cached and the sessions exist, so devices then the message.
+    int before = pr.nsent;
+    id = wa_client_send_text(&c, "15550001111@s.whatsapp.net", "second");
+    CHECK(id && pr.nsent == before + 1 && strstr(pr.sent[before], "context=\"message\""),
+          "a cached LID skips the lookup");
+    feed_usync(&c, c.out.iq_id, users, 2);
+    CHECK(pr.nsent == before + 2 && strstr(pr.sent[before + 1], "xmlns=\"encrypt\"") &&
+              strstr(pr.sent[before + 1], "88800001111:3@lid") && !strstr(pr.sent[before + 1], "88800001111@lid"),
+          "prekeys are fetched only for the device still without a session");
+    bundle_nodes bn3;
+    wa_node pk3 = bundle_user(&bn3, j3, &them3, NULL, false);
+    wa_node pklist3 = {"list", NULL, 0, wa_vlist(&pk3, 1)};
+    feed_iq_result(&c, c.out.iq_id, &pklist3, 1);
+    CHECK(pr.nsent == before + 3 && strstr(pr.sent[before + 2], "<message"), "then the message");
+    rc = open_enc(&pr, &s0, "88800001111", 0, &pt, &ptl, type);
+    CHECK(rc == 0 && strcmp(type, "pkmsg") == 0, "unanswered sessions keep sending prekey messages");
+    if (rc == 0) free(pt);
+    rc = open_enc(&pr, &s3, "88800001111", 3, &pt, &ptl, type);
+    CHECK(rc == 0 && ptl > 0, "the companion gets its copy now");
+    if (rc == 0) free(pt);
+    snprintf(msg_id, sizeof msg_id, "%s", id ? id : "");
+    aattrs[1].val = wa_vstr(msg_id);
+    wa_attr eattr = {"error", wa_vstr("479")};
+    wa_attr aattrs2[] = {aattrs[0], aattrs[1], aattrs[2], eattr};
+    wa_node nack = {"ack", aattrs2, 4, {0}};
+    feed_node(&c, &nack);
+    CHECK(pr.sends_failed == 1 && strstr(pr.send_error, "479") && c.out.stage == 0, "an ack with an error fails the send");
+
+    // A LID chat needs no lookup; an unanswered query times out.
+    before = pr.nsent;
+    id = wa_client_send_text(&c, "88800001111@lid", "third");
+    CHECK(id && pr.nsent == before + 1 && strstr(pr.sent[before], "context=\"message\""), "a LID goes straight to devices");
+    probe_time += 25000;
+    wa_client_tick(&c);
+    CHECK(pr.sends_failed == 2 && strstr(pr.send_error, "timed out"), "a send times out");
+
+    wa_client_free(&c);
+    free(pr.raw);
+    kv_clear(&kv);
+    kv_clear(&k0);
+    kv_clear(&k3);
+    kv_clear(&km);
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     test_hkdf();
@@ -675,6 +1122,9 @@ int main(void) {
     test_store();
     test_signal_interop();
     test_client_messages();
+    test_signal_initiator();
+    test_signal_initiator_interop();
+    test_client_send();
     printf("%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

@@ -75,6 +75,8 @@ typedef enum {
     WA_EV_MESSAGE,      // msg: a decrypted message; node: the <message> stanza
     WA_EV_UNDECRYPTABLE,// msg: what is known about it; text: why; a retry was requested
     WA_EV_PREKEYS,      // seconds: how many one-time prekeys were uploaded
+    WA_EV_SENT,         // text: id of the message wa_client_send_text started; the server took it
+    WA_EV_SEND_FAILED,  // text: why that message was not sent
 } wa_event_type;
 
 // A received message. Strings are valid only during the event callback.
@@ -120,6 +122,9 @@ typedef struct {
 
 typedef enum { WA_S_IDLE, WA_S_HELLO_SENT, WA_S_OPEN, WA_S_CLOSED } wa_state;
 
+#define WA_SEND_MAX_DEVICES 16  // the recipient's devices plus our own others
+#define WA_LID_CACHE 8
+
 typedef struct {
     wa_store *store;
     wa_callbacks cb;
@@ -157,6 +162,27 @@ typedef struct {
         uint8_t count;
     } retries[16];
     uint8_t retry_next;
+
+    // The message being sent (wa_send.c); one at a time.
+    struct {
+        uint8_t stage;
+        char id[24];      // message id
+        char iq_id[24];   // the request we are waiting on
+        char to_lid[32];  // the recipient's LID user
+        char pn[32];      // their phone number, when the app gave one
+        char *text;
+        uint64_t deadline_ms;
+        uint8_t ndev;
+        struct {
+            char user[32];  // a LID user: theirs or ours
+            uint16_t device;
+        } dev[WA_SEND_MAX_DEVICES];
+    } out;
+    // Phone number -> LID, learned from usync answers and incoming messages.
+    struct {
+        char pn[24], lid[24];
+    } lids[WA_LID_CACHE];
+    uint8_t lid_next;
 } wa_client;
 
 void wa_client_init(wa_client *c, wa_store *s, const wa_callbacks *cb);
@@ -170,3 +196,10 @@ void wa_client_free(wa_client *c);
 int wa_client_send_node(wa_client *c, const wa_node *n);
 // A fresh request id ("<prefix><counter>"), valid until the next call.
 const char *wa_client_next_id(wa_client *c);
+
+// Send a text message to a person: to is "<number>@s.whatsapp.net" or
+// "<lid>@lid", as wa_message.chat gives it. Our own number works too ("note to
+// self"). Returns the new message's id (valid until the next send), or NULL
+// if the client is not logged in, another send is still running, or to is not
+// a user JID. The outcome arrives as WA_EV_SENT or WA_EV_SEND_FAILED.
+const char *wa_client_send_text(wa_client *c, const char *to, const char *text);

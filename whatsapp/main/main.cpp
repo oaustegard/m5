@@ -9,6 +9,8 @@
 //   hold A 3 s  forget WiFi and start the setup access point
 //   hold C 5 s  unlink: forget the WhatsApp pairing and show a new QR code
 #include <M5Unified.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -135,15 +137,30 @@ static void keys_wipe(void) {
 
 // ---------------------------------------------------------------- messages
 
+static wa_client client;
+
 // The newest messages, drawn newest at the bottom.
 #define INBOX 8
 struct inbox_line {
     char who[40];
     char text[160];
+    char chat[48];     // where a reply goes
+    int top, bottom;   // where it was last drawn, for taps; -1 when off screen
 };
 static inbox_line inbox[INBOX];
 static int inbox_n;
 static char status_line[64];
+static char note[64];  // a passing notice in place of the status line
+static int64_t note_until_us;
+
+static void set_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void set_note(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(note, sizeof note, fmt, ap);
+    va_end(ap);
+    note_until_us = esp_timer_get_time() + 6 * 1000000LL;
+}
 
 static void draw_inbox(void) {
     auto &d = M5.Display;
@@ -151,8 +168,9 @@ static void draw_inbox(void) {
     d.fillScreen(TFT_BLACK);
     d.setTextDatum(top_left);
     d.setFont(&fonts::efontJA_14);  // UTF-8 with Latin, Greek, Cyrillic and CJK glyphs
-    d.setTextColor(TFT_GREEN, TFT_BLACK);
-    d.drawString(status_line, 4, 2);
+    bool noting = note[0] && esp_timer_get_time() < note_until_us;
+    d.setTextColor(noting ? TFT_ORANGE : TFT_GREEN, TFT_BLACK);
+    d.drawString(noting ? note : status_line, 4, 2);
     d.drawFastHLine(0, 20, d.width(), TFT_DARKGREY);
     if (inbox_n == 0) {
         d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
@@ -161,8 +179,9 @@ static void draw_inbox(void) {
     // Lay out from the newest message up until the screen is full.
     int bottom = d.height() - 2, lh = d.fontHeight();
     d.setTextWrap(true, false);
+    for (int i = 0; i < inbox_n; i++) inbox[i].top = inbox[i].bottom = -1;
     for (int i = inbox_n - 1; i >= 0 && bottom > 24; i--) {
-        const inbox_line &m = inbox[i];
+        inbox_line &m = inbox[i];
         // Two lines of text at most per message keeps a few on screen.
         int h = lh * (1 + (d.textWidth(m.text) > d.width() - 8 ? 2 : 1));
         int top = bottom - h;
@@ -175,27 +194,163 @@ static void draw_inbox(void) {
         d.setCursor(4, top + lh);
         d.print(m.text);
         d.clearClipRect();
+        m.top = top;
+        m.bottom = bottom;
         bottom = top - 4;
     }
     d.endWrite();
 }
 
-static void inbox_add(const wa_message *msg) {
+static inbox_line *inbox_push(void) {
     if (inbox_n == INBOX) {
         memmove(&inbox[0], &inbox[1], sizeof inbox[0] * (INBOX - 1));
         inbox_n--;
     }
-    inbox_line &m = inbox[inbox_n++];
+    inbox_line *m = &inbox[inbox_n++];
+    memset(m, 0, sizeof *m);
+    return m;
+}
+
+// The name to show for a chat we only know by JID: "+15551234567", or the LID.
+static void chat_name(const char *jid, char *out, size_t n) {
+    bool pn = strstr(jid, "@s.whatsapp.net") != NULL;
+    snprintf(out, n, "%s%.*s", pn ? "+" : "", (int)strcspn(jid, ":@"), jid);
+}
+
+static void inbox_add(const wa_message *msg) {
+    inbox_line &m = *inbox_push();
     const char *name = msg->from_me ? "me" : msg->push_name;
     char user[32];
     if (!name || !*name) {
-        // "15551234567:3@s.whatsapp.net" -> "+15551234567"
-        snprintf(user, sizeof user, "+%.*s", (int)strcspn(msg->sender, ":@"), msg->sender);
+        chat_name(msg->sender, user, sizeof user);
         name = user;
     }
     snprintf(m.who, sizeof m.who, "%s%s", name, msg->is_group ? " (group)" : "");
     snprintf(m.text, sizeof m.text, "%s", msg->text ? msg->text : "");
+    snprintf(m.chat, sizeof m.chat, "%s", msg->chat);
     draw_inbox();
+}
+
+// ---------------------------------------------------------------- replies
+
+// Tap a message (or press B for the newest one from someone else) to reply
+// with one of three canned answers on buttons A, B and C.
+static const char *const REPLIES[3] = {"OK", "Thanks!", "On my way"};
+static bool replying;
+static int64_t reply_until_us;
+static char reply_chat[48], reply_who[40], reply_quote[160];
+static char sending_text[40], sending_who[40];  // the reply in flight
+static bool sending;
+
+static void draw_reply(void) {
+    auto &d = M5.Display;
+    d.startWrite();
+    d.fillScreen(TFT_BLACK);
+    d.setFont(&fonts::efontJA_14);
+    d.setTextDatum(top_left);
+    d.setTextColor(TFT_GREEN, TFT_BLACK);
+    d.drawString("Reply to", 4, 4);
+    d.setTextColor(TFT_CYAN, TFT_BLACK);
+    d.drawString(reply_who, 4 + d.textWidth("Reply to "), 4);
+    d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    d.setTextWrap(true, false);
+    d.setClipRect(0, 26, d.width(), 120);
+    d.setCursor(4, 30);
+    d.print(reply_quote);
+    d.clearClipRect();
+    // Labels over the Core2's three touch buttons (centred at x = 1/6, 1/2, 5/6).
+    d.setTextDatum(bottom_center);
+    for (int i = 0; i < 3; i++) {
+        int x = d.width() * (2 * i + 1) / 6;
+        d.fillRoundRect(x - 50, d.height() - 44, 100, 38, 6, TFT_DARKGREEN);
+        d.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+        d.drawString(REPLIES[i], x, d.height() - 16);
+    }
+    d.endWrite();
+}
+
+static void reply_open(const inbox_line &m) {
+    if (strstr(m.chat, "@g.us") || strstr(m.chat, "@broadcast")) {
+        set_note("Can't reply to groups yet");
+        draw_inbox();
+        return;
+    }
+    snprintf(reply_chat, sizeof reply_chat, "%s", m.chat);
+    if (strcmp(m.who, "me") == 0)
+        chat_name(m.chat, reply_who, sizeof reply_who);
+    else
+        snprintf(reply_who, sizeof reply_who, "%s", m.who);
+    snprintf(reply_quote, sizeof reply_quote, "%s", m.text);
+    replying = true;
+    reply_until_us = esp_timer_get_time() + 15 * 1000000LL;
+    draw_reply();
+}
+
+static void reply_close(void) {
+    replying = false;
+    draw_inbox();
+}
+
+static void reply_send(int choice) {
+    replying = false;
+    if (sending) {
+        set_note("Still sending the last reply");
+    } else if (!wa_client_send_text(&client, reply_chat, REPLIES[choice])) {
+        set_note("Not connected; reply not sent");
+    } else {
+        sending = true;
+        snprintf(sending_text, sizeof sending_text, "%s", REPLIES[choice]);
+        snprintf(sending_who, sizeof sending_who, "%s", reply_who);
+        set_note("Sending \"%s\"...", REPLIES[choice]);
+    }
+    draw_inbox();
+}
+
+static void on_sent(void) {
+    sending = false;
+    inbox_line &m = *inbox_push();
+    snprintf(m.who, sizeof m.who, "me to %s", sending_who);
+    snprintf(m.text, sizeof m.text, "%s", sending_text);
+    snprintf(m.chat, sizeof m.chat, "%s", reply_chat);
+    note[0] = 0;
+    draw_inbox();
+}
+
+static void on_send_failed(const char *why) {
+    sending = false;
+    set_note("Not sent: %s", why);
+    draw_inbox();
+}
+
+// Buttons and taps while the inbox is up. Returns after at most one action.
+static void reply_input(void) {
+    if (replying) {
+        if (M5.BtnA.wasClicked()) return reply_send(0);
+        if (M5.BtnB.wasClicked()) return reply_send(1);
+        if (M5.BtnC.wasClicked()) return reply_send(2);
+        auto t = M5.Touch.getDetail();
+        if ((t.wasClicked() && t.y < M5.Display.height()) || esp_timer_get_time() > reply_until_us)
+            return reply_close();
+        return;
+    }
+    if (!client.logged_in) return;
+    if (M5.BtnB.wasClicked()) {
+        for (int i = inbox_n - 1; i >= 0; i--)
+            if (strcmp(inbox[i].who, "me") != 0 && strncmp(inbox[i].who, "me to ", 6) != 0)
+                return reply_open(inbox[i]);
+        if (inbox_n) return reply_open(inbox[inbox_n - 1]);
+        set_note("No message to reply to");
+        return draw_inbox();
+    }
+    auto t = M5.Touch.getDetail();
+    if (t.wasClicked() && t.y < M5.Display.height()) {
+        for (int i = 0; i < inbox_n; i++)
+            if (inbox[i].top >= 0 && t.y >= inbox[i].top && t.y <= inbox[i].bottom) return reply_open(inbox[i]);
+    }
+    if (note[0] && esp_timer_get_time() >= note_until_us) {
+        note[0] = 0;
+        draw_inbox();
+    }
 }
 
 // ---------------------------------------------------------------- websocket
@@ -280,7 +435,6 @@ static void ws_stop(void) {
 
 // ---------------------------------------------------------------- wa core
 
-static wa_client client;
 static bool want_reconnect;
 static int64_t reconnect_at_us;
 
@@ -325,7 +479,10 @@ static void on_event(void *, const wa_event *ev) {
             schedule_reconnect(2000);
             break;
         case WA_EV_MESSAGE:
-            if (ev->msg->text) inbox_add(ev->msg);
+            if (ev->msg->text) {
+                inbox_add(ev->msg);
+                if (replying) draw_reply();  // keep the reply screen up
+            }
             break;
         case WA_EV_UNDECRYPTABLE:
             ESP_LOGW(TAG, "undecryptable message from %s: %s", ev->msg->sender, ev->text);
@@ -339,6 +496,12 @@ static void on_event(void *, const wa_event *ev) {
         case WA_EV_ERROR:
             screen("Connection problem", ev->text, "Retrying...", TFT_ORANGE);
             schedule_reconnect(5000);
+            break;
+        case WA_EV_SENT:
+            on_sent();
+            break;
+        case WA_EV_SEND_FAILED:
+            on_send_failed(ev->text);
             break;
         case WA_EV_NODE:
             break;
@@ -511,6 +674,7 @@ extern "C" void app_main(void) {
         }
 
         M5.update();
+        reply_input();
         if (M5.BtnA.pressedFor(3000)) {
             provision_clear();
             esp_restart();

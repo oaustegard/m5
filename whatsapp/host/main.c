@@ -5,6 +5,7 @@
 //   out: 'S' send binary message, 'R' reconnect (close and reopen), 'Q' quit
 // Logs and events go to stderr, one per line; QR payloads as "QR <secs> <text>",
 // decrypted messages as "MESSAGE <chat> <sender> (<kind>) <id>: <text>".
+// --send <jid> <text> sends one text message after login ("EVENT sent <id>").
 // Signal sessions and prekeys live in <store>.keys/, one file per key.
 #include <dirent.h>
 #include <errno.h>
@@ -27,6 +28,7 @@ static char keys_dir[512];  // <store>.keys/: one file per Signal session, sende
 static wa_store store;
 static wa_client client;
 static int quit_after_login = 0;
+static const char *send_to, *send_text;
 
 int wa_random(uint8_t *out, size_t n) {
     while (n) {
@@ -185,6 +187,20 @@ static void cb_event(void *ctx, const wa_event *ev) {
         case WA_EV_LOGGED_IN:
             fprintf(stderr, "EVENT logged_in user=%s device=%u lid=%s platform=%s\n", store.user, store.device,
                     store.lid_user, store.platform);
+            if (send_to) {
+                const char *id = wa_client_send_text(&client, send_to, send_text);
+                fprintf(stderr, "EVENT send_started %s\n", id ? id : "(refused)");
+                send_to = NULL;
+            } else if (quit_after_login) {
+                emit_frame('Q', NULL, 0);
+            }
+            break;
+        case WA_EV_SENT:
+            fprintf(stderr, "EVENT sent %s\n", ev->text);
+            if (quit_after_login) emit_frame('Q', NULL, 0);
+            break;
+        case WA_EV_SEND_FAILED:
+            fprintf(stderr, "EVENT send_failed %s\n", ev->text);
             if (quit_after_login) emit_frame('Q', NULL, 0);
             break;
         case WA_EV_LOGGED_OUT:
@@ -238,6 +254,10 @@ int main(int argc, char **argv) {
             store_path = argv[++i];
         else if (strcmp(argv[i], "--quit-after-login") == 0)
             quit_after_login = 1;
+        else if (strcmp(argv[i], "--send") == 0 && i + 2 < argc) {
+            send_to = argv[++i];
+            send_text = argv[++i];
+        }
     }
     setvbuf(stderr, NULL, _IOLBF, 0);
 

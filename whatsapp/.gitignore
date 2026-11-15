@@ -1,0 +1,10 @@
+host/wa-host
+host/test-wa
+host/*.bin
+host/qr.png
+host/qr.txt
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock

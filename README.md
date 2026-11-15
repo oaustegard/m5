@@ -10,6 +10,7 @@ Each project is self-contained in its own directory. Firmware is ESP-IDF; `pager
 | project | what it is | status |
 |---|---|---|
 | [`doom/`](doom/) | PrBoom with shareware DOOM1.WAD: tilt to move, touch to fire, vibration on shots, hits and damage | builds and plays in QEMU; not yet run on a Core2 |
+| [`whatsapp/`](whatsapp/) | A WhatsApp linked-device client ported from whatsmeow to C: QR pairing on screen | handshake and QR refs work against WhatsApp's servers from a host build; pairing untested; firmware not started |
 | [`pager/`](pager/) | The Core2 as a pager for Muninn: a button press starts a Claude Code session, and session state and yes/no questions come back to the screen | Cloudflare Worker deployed and tested; firmware not started |
 
 ## Toolchain
@@ -43,4 +44,5 @@ license.
 | everything without its own `LICENSE` | MIT (root `LICENSE`) | default |
 | `doom/` | GPL-3.0 (`doom/LICENSE`) | `doom/main/doom_main.c` is adapted from a GPL-3.0 file in retro-go (an ESP32 emulator firmware), and the PrBoom engine is GPL-2.0-or-later, so the combination is GPL-3.0 |
 | `doom/main/m5_hal.cpp`, `doom/main/m5_hal.h` | MIT (root `LICENSE`, by SPDX header) | original to this repo; reusable outside `doom/` |
+| `whatsapp/components/wa/` | MPL-2.0 (`whatsapp/components/wa/LICENSE`), Monocypher BSD-2-Clause/CC0 | ported from whatsmeow, which is MPL-2.0 |
 | `doom/wads/DOOM1.WAD` | id Software's shareware terms, stated in the WAD's original distribution | redistributable unmodified; not GPL |

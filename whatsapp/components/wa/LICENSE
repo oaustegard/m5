@@ -1,0 +1,7 @@
+Files in this directory that carry "SPDX-License-Identifier: MPL-2.0" are
+ported from whatsmeow (https://github.com/tulir/whatsmeow), Copyright (c)
+Tulir Asokan, and are distributed under the Mozilla Public License 2.0:
+https://mozilla.org/MPL/2.0/
+
+third_party/monocypher* are Monocypher 4.0.2 by Loup Vaillant, dual-licensed
+BSD-2-Clause / CC0-1.0; see third_party/MONOCYPHER-LICENCE.md.

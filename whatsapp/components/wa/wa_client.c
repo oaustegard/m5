@@ -10,6 +10,7 @@
 
 #include "wa.h"
 #include "wa_crypto.h"
+#include "wa_internal.h"
 #include "wa_pb.h"
 
 #define FRAME_MAX (1u << 24)
@@ -35,9 +36,23 @@ static void wa_log(wa_client *c, const char *fmt, ...) {
     c->cb.log(c->cb.ctx, buf);
 }
 
+void wa__log(wa_client *c, const char *fmt, ...) {
+    if (!c->cb.log) return;
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    c->cb.log(c->cb.ctx, buf);
+}
+
+void wa__emit(wa_client *c, const wa_event *ev) {
+    if (c->cb.event) c->cb.event(c->cb.ctx, ev);
+}
+
 static void emit(wa_client *c, wa_event_type t, const char *text, int seconds, const wa_node *node) {
-    wa_event ev = {t, text, seconds, node};
-    if (c->cb.event) c->cb.event(c->cb.ctx, &ev);
+    wa_event ev = {t, text, seconds, node, NULL};
+    wa__emit(c, &ev);
 }
 
 static void fail(wa_client *c, const char *why) {
@@ -573,10 +588,29 @@ static void handle_node(wa_client *c, const wa_node *n) {
         const wa_node *kids;
         size_t nk = wa_children(n, &kids);
         wa_jid server = WA_SERVER_JID;
+        const char *type = wa_attr_str(n, "type");
+        const char *xmlns = wa_attr_str(n, "xmlns");
         if (from && wa_jid_eq(from, &server) && nk == 1) {
             if (strcmp(kids[0].tag, "pair-device") == 0) return handle_pair_device(c, n, &kids[0]);
             if (strcmp(kids[0].tag, "pair-success") == 0) return handle_pair_success(c, n, &kids[0]);
         }
+        // request.go handleIQ: answer the server's pings.
+        if (type && xmlns && strcmp(type, "get") == 0 && strcmp(xmlns, "urn:xmpp:ping") == 0) {
+            const char *id = wa_attr_str(n, "id");
+            return send_iq_result(c, id ? id : "", NULL);
+        }
+        if (type && (strcmp(type, "result") == 0 || strcmp(type, "error") == 0) && wa__handle_iq_response(c, n))
+            return;
+    } else if (strcmp(n->tag, "message") == 0) {
+        if (wa__handle_message(c, n)) return;
+    } else if (strcmp(n->tag, "notification") == 0) {
+        emit(c, WA_EV_NODE, NULL, 0, n);  // apps may want the content; the ack follows
+        wa__handle_notification(c, n);
+        return;
+    } else if (strcmp(n->tag, "receipt") == 0 || strcmp(n->tag, "call") == 0) {
+        emit(c, WA_EV_NODE, NULL, 0, n);
+        wa__send_ack(c, n, 0);
+        return;
     } else if (strcmp(n->tag, "success") == 0) {
         c->logged_in = true;
         const wa_jid *lid = wa_attr_jid(n, "lid");
@@ -592,6 +626,7 @@ static void handle_node(wa_client *c, const wa_node *n) {
                            {"to", wa_vjid(WA_SERVER_JID)}};
         wa_node iq = {"iq", attrs, 4, wa_vlist(&active, 1)};
         wa_client_send_node(c, &iq);
+        wa__on_success(c);
         emit(c, WA_EV_LOGGED_IN, NULL, 0, n);
         return;
     } else if (strcmp(n->tag, "failure") == 0) {

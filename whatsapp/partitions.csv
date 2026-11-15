@@ -2,3 +2,6 @@
 nvs,      data, nvs,     0x9000,  0x6000
 phy_init, data, phy,     0xf000,  0x1000
 factory,  app,  factory, 0x10000, 4M
+# Signal sessions, sender keys and prekeys (wa_kv); its own NVS so the
+# WiFi and pairing NVS never fills up with sessions.
+wakeys,   data, nvs,     0x410000, 0x100000

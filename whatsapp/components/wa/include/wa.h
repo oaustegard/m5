@@ -46,6 +46,22 @@ typedef struct {
 // Generate fresh keys for an unpaired device. Returns 0 or -1.
 int wa_store_init(wa_store *s);
 
+// A key-value store for Signal sessions, sender keys and prekeys (NVS on the
+// Core2, files on the host). Keys are at most 14 characters. Values are
+// opaque blobs of up to about 8 KB. Its contents belong to one device
+// identity: the platform clears it whenever the store is unpaired (at start,
+// and on WA_EV_LOGGED_OUT).
+typedef struct {
+    // Copy the value (at most cap bytes) into buf and return its full length;
+    // 0 if the key is absent; -1 on error.
+    int (*get)(void *ctx, const char *key, uint8_t *buf, size_t cap);
+    // Return 0 on success.
+    int (*set)(void *ctx, const char *key, const uint8_t *data, size_t len);
+    // Return 0 on success, including when the key was absent.
+    int (*del)(void *ctx, const char *key);
+    void *ctx;
+} wa_kv;
+
 typedef enum {
     WA_EV_QR,           // text: QR payload to render; seconds: how long it is valid
     WA_EV_QR_EXHAUSTED, // every QR expired unscanned; reconnect to get new ones
@@ -56,13 +72,32 @@ typedef enum {
     WA_EV_RECONNECT,    // server asked us to reconnect (stream error 515)
     WA_EV_ERROR,        // text: what failed; the platform should close and retry
     WA_EV_NODE,         // node: a decoded node nobody handled (for debugging/apps)
+    WA_EV_MESSAGE,      // msg: a decrypted message; node: the <message> stanza
+    WA_EV_UNDECRYPTABLE,// msg: what is known about it; text: why; a retry was requested
+    WA_EV_PREKEYS,      // seconds: how many one-time prekeys were uploaded
 } wa_event_type;
+
+// A received message. Strings are valid only during the event callback.
+typedef struct {
+    const char *id;
+    const char *chat;       // conversation: "<user>@s.whatsapp.net", "<lid>@lid", "<id>@g.us"
+    const char *sender;     // sending device, "<user>:<device>@<server>"
+    const char *push_name;  // the sender's display name, or NULL
+    int64_t timestamp;      // unix seconds
+    bool from_me;           // sent by our own account (from the phone or another companion)
+    bool is_group;
+    // "text", "image", "video", "audio", "sticker", "document", "location",
+    // "contact", "reaction", "poll", "protocol" (no visible content), "other"
+    const char *kind;
+    const char *text;  // UTF-8 for display (body, caption or a label), or NULL
+} wa_message;
 
 typedef struct {
     wa_event_type type;
     const char *text;
     int seconds;
     const wa_node *node;
+    const wa_message *msg;
 } wa_event;
 
 typedef struct {
@@ -78,6 +113,9 @@ typedef struct {
     // Optional log sink.
     void (*log)(void *ctx, const char *msg);
     void *ctx;
+    // Session storage. Without it (get == NULL) the client logs in but cannot
+    // upload prekeys or decrypt messages.
+    wa_kv kv;
 } wa_callbacks;
 
 typedef enum { WA_S_IDLE, WA_S_HELLO_SENT, WA_S_OPEN, WA_S_CLOSED } wa_state;
@@ -109,6 +147,16 @@ typedef struct {
     uint64_t qr_deadline_ms;
     uint64_t next_ping_ms;
     bool logged_in;
+
+    // Outstanding requests (ids from wa_client_next_id).
+    char prekey_count_id[24];
+    char prekey_upload_id[24];
+    // Retry receipts sent per message id (whatsmeow messageRetries).
+    struct {
+        uint32_t id_hash;
+        uint8_t count;
+    } retries[16];
+    uint8_t retry_next;
 } wa_client;
 
 void wa_client_init(wa_client *c, wa_store *s, const wa_callbacks *cb);

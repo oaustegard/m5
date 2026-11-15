@@ -222,6 +222,43 @@ int wa_aes_ctr(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, s
     return ret ? -1 : 0;
 }
 
+// PKCS#7-padded AES-256-CBC (libsignal cipher/Cipher.go EncryptCbc/DecryptCbc).
+int wa_aes_cbc_encrypt(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out,
+                       size_t *outlen) {
+    size_t pad = 16 - len % 16, total = len + pad;
+    memmove(out, in, len);
+    memset(out + len, (int)pad, pad);
+    uint8_t ivc[16];
+    memcpy(ivc, iv, 16);
+    mbedtls_aes_context a;
+    mbedtls_aes_init(&a);
+    int ret = mbedtls_aes_setkey_enc(&a, key, 256);
+    if (!ret) ret = mbedtls_aes_crypt_cbc(&a, MBEDTLS_AES_ENCRYPT, total, ivc, out, out);
+    mbedtls_aes_free(&a);
+    if (ret) return -1;
+    *outlen = total;
+    return 0;
+}
+
+int wa_aes_cbc_decrypt(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out,
+                       size_t *outlen) {
+    if (len == 0 || len % 16) return -1;
+    uint8_t ivc[16];
+    memcpy(ivc, iv, 16);
+    mbedtls_aes_context a;
+    mbedtls_aes_init(&a);
+    int ret = mbedtls_aes_setkey_dec(&a, key, 256);
+    if (!ret) ret = mbedtls_aes_crypt_cbc(&a, MBEDTLS_AES_DECRYPT, len, ivc, in, out);
+    mbedtls_aes_free(&a);
+    if (ret) return -1;
+    uint8_t pad = out[len - 1];
+    if (pad == 0 || pad > 16) return -1;
+    for (size_t i = len - pad; i < len; i++)
+        if (out[i] != pad) return -1;
+    *outlen = len - pad;
+    return 0;
+}
+
 int wa_ct_equal(const uint8_t *a, const uint8_t *b, size_t n) {
     uint8_t d = 0;
     for (size_t i = 0; i < n; i++) d |= a[i] ^ b[i];

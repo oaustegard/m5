@@ -50,6 +50,14 @@ void wa_pbkdf2_sha256(const uint8_t *pw, size_t pwlen, const uint8_t *salt, size
 // AES-256-CTR with a 16-byte initial counter block; in and out may alias.
 int wa_aes_ctr(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out);
 
+// AES-256-CBC with PKCS#7 padding. Encrypt: out must hold len + 16 bytes.
+// Decrypt: out must hold len bytes; fails on bad length or padding. in and
+// out may alias.
+int wa_aes_cbc_encrypt(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out,
+                       size_t *outlen);
+int wa_aes_cbc_decrypt(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out,
+                       size_t *outlen);
+
 // Constant-time comparison; 1 if equal.
 int wa_ct_equal(const uint8_t *a, const uint8_t *b, size_t n);
 

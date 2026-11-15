@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Core2 firmware: joins WiFi, connects to WhatsApp, shows the pairing QR code
-// on screen, and stays online as a linked device.
+// on screen, stays online as a linked device, and shows incoming messages.
 //
 // Threads: the WebSocket client delivers events on its own task; they go
 // through a queue to the main loop, which is the only caller of the wa core.
@@ -83,6 +83,119 @@ static void store_save(void *, const wa_store *s) {
     nvs_commit(h);
     nvs_close(h);
     ESP_LOGI(TAG, "store saved (paired=%d)", s->paired);
+}
+
+// ---------------------------------------------------------------- key store
+
+// Signal sessions, sender keys and prekeys, in their own NVS partition.
+#define KEYS_PARTITION "wakeys"
+static nvs_handle_t keys_nvs;
+static bool keys_ok;
+
+static void keys_open(void) {
+    esp_err_t err = nvs_flash_init_partition(KEYS_PARTITION);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase_partition(KEYS_PARTITION);
+        err = nvs_flash_init_partition(KEYS_PARTITION);
+    }
+    keys_ok = err == ESP_OK && nvs_open_from_partition(KEYS_PARTITION, "sig", NVS_READWRITE, &keys_nvs) == ESP_OK;
+    if (!keys_ok) ESP_LOGE(TAG, "key store unavailable (%s); messages will not decrypt", esp_err_to_name(err));
+}
+
+static int kv_get(void *, const char *key, uint8_t *buf, size_t cap) {
+    if (!keys_ok) return -1;
+    size_t len = 0;
+    esp_err_t err = nvs_get_blob(keys_nvs, key, NULL, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return 0;
+    if (err != ESP_OK) return -1;
+    if (len > cap) return (int)len;  // the core treats a size mismatch as "no record"
+    err = nvs_get_blob(keys_nvs, key, buf, &len);
+    return err == ESP_OK ? (int)len : -1;
+}
+
+static int kv_set(void *, const char *key, const uint8_t *data, size_t len) {
+    if (!keys_ok || nvs_set_blob(keys_nvs, key, data, len) != ESP_OK) return -1;
+    return nvs_commit(keys_nvs) == ESP_OK ? 0 : -1;
+}
+
+static int kv_del(void *, const char *key) {
+    if (!keys_ok) return -1;
+    esp_err_t err = nvs_erase_key(keys_nvs, key);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return -1;
+    return nvs_commit(keys_nvs) == ESP_OK ? 0 : -1;
+}
+
+// Sessions and prekeys belong to one device identity; drop them with it.
+static void keys_wipe(void) {
+    if (!keys_ok) return;
+    nvs_erase_all(keys_nvs);
+    nvs_commit(keys_nvs);
+    ESP_LOGI(TAG, "key store cleared");
+}
+
+// ---------------------------------------------------------------- messages
+
+// The newest messages, drawn newest at the bottom.
+#define INBOX 8
+struct inbox_line {
+    char who[40];
+    char text[160];
+};
+static inbox_line inbox[INBOX];
+static int inbox_n;
+static char status_line[64];
+
+static void draw_inbox(void) {
+    auto &d = M5.Display;
+    d.startWrite();
+    d.fillScreen(TFT_BLACK);
+    d.setTextDatum(top_left);
+    d.setFont(&fonts::efontJA_14);  // UTF-8 with Latin, Greek, Cyrillic and CJK glyphs
+    d.setTextColor(TFT_GREEN, TFT_BLACK);
+    d.drawString(status_line, 4, 2);
+    d.drawFastHLine(0, 20, d.width(), TFT_DARKGREY);
+    if (inbox_n == 0) {
+        d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+        d.drawString("No messages yet", 4, 30);
+    }
+    // Lay out from the newest message up until the screen is full.
+    int bottom = d.height() - 2, lh = d.fontHeight();
+    d.setTextWrap(true, false);
+    for (int i = inbox_n - 1; i >= 0 && bottom > 24; i--) {
+        const inbox_line &m = inbox[i];
+        // Two lines of text at most per message keeps a few on screen.
+        int h = lh * (1 + (d.textWidth(m.text) > d.width() - 8 ? 2 : 1));
+        int top = bottom - h;
+        if (top < 24) break;
+        d.setClipRect(0, top, d.width(), h);
+        d.setTextColor(TFT_CYAN, TFT_BLACK);
+        d.setCursor(4, top);
+        d.print(m.who);
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+        d.setCursor(4, top + lh);
+        d.print(m.text);
+        d.clearClipRect();
+        bottom = top - 4;
+    }
+    d.endWrite();
+}
+
+static void inbox_add(const wa_message *msg) {
+    if (inbox_n == INBOX) {
+        memmove(&inbox[0], &inbox[1], sizeof inbox[0] * (INBOX - 1));
+        inbox_n--;
+    }
+    inbox_line &m = inbox[inbox_n++];
+    const char *name = msg->from_me ? "me" : msg->push_name;
+    char user[32];
+    if (!name || !*name) {
+        // "15551234567:3@s.whatsapp.net" -> "+15551234567"
+        snprintf(user, sizeof user, "+%.*s", (int)strcspn(msg->sender, ":@"), msg->sender);
+        name = user;
+    }
+    snprintf(m.who, sizeof m.who, "%s%s", name, msg->is_group ? " (group)" : "");
+    snprintf(m.text, sizeof m.text, "%s", msg->text ? msg->text : "");
+    draw_inbox();
 }
 
 // ---------------------------------------------------------------- websocket
@@ -176,7 +289,6 @@ static int64_t unix_time(void *) {
 static void log_cb(void *, const char *msg) { ESP_LOGI("wa", "%s", msg); }
 
 static void on_event(void *, const wa_event *ev) {
-    char line[64];
     switch (ev->type) {
         case WA_EV_QR:
             screen_qr(ev->text, ev->seconds);
@@ -193,12 +305,23 @@ static void on_event(void *, const wa_event *ev) {
             schedule_reconnect(5000);
             break;
         case WA_EV_LOGGED_IN:
-            snprintf(line, sizeof line, "+%s, device %u", store.user, store.device);
-            screen("WhatsApp online", line, "hold C 5 s to unlink", TFT_GREEN);
+            snprintf(status_line, sizeof status_line, "Online: +%s (device %u)", store.user, store.device);
+            draw_inbox();
             break;
         case WA_EV_LOGGED_OUT:
+            keys_wipe();
+            inbox_n = 0;
             screen("Unlinked", ev->text, "Getting a new QR code...", TFT_ORANGE);
             schedule_reconnect(2000);
+            break;
+        case WA_EV_MESSAGE:
+            if (ev->msg->text) inbox_add(ev->msg);
+            break;
+        case WA_EV_UNDECRYPTABLE:
+            ESP_LOGW(TAG, "undecryptable message from %s: %s", ev->msg->sender, ev->text);
+            break;
+        case WA_EV_PREKEYS:
+            ESP_LOGI(TAG, "uploaded %d prekeys", ev->seconds);
             break;
         case WA_EV_RECONNECT:
             schedule_reconnect(200);
@@ -298,13 +421,15 @@ extern "C" void app_main(void) {
     esp_netif_sntp_init(&sntp);
 
     // Keys come from the hardware RNG, which is truly random now WiFi is up.
+    keys_open();
     if (!store_load()) {
         wa_store_init(&store);
         store_save(NULL, &store);
     }
+    if (!store.paired) keys_wipe();  // a new identity starts with no sessions or prekeys
 
     ws_queue = xQueueCreate(32, sizeof(ws_event));
-    wa_callbacks cb = {ws_send, on_event, store_save, now_ms, unix_time, log_cb, NULL};
+    wa_callbacks cb = {ws_send, on_event, store_save, now_ms, unix_time, log_cb, NULL, {kv_get, kv_set, kv_del, NULL}};
     wa_client_init(&client, &store, &cb);
 
     screen("Connecting", "web.whatsapp.com");
@@ -352,6 +477,7 @@ extern "C" void app_main(void) {
             screen("Unlinking...");
             wa_store_init(&store);
             store_save(NULL, &store);
+            keys_wipe();
             vTaskDelay(pdMS_TO_TICKS(500));
             esp_restart();
         }

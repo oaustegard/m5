@@ -385,8 +385,7 @@ static void start_setup_ap(void) {
 
 extern "C" void app_main(void) {
     auto cfg = M5.config();
-    M5.begin(cfg);
-    M5.Display.setRotation(1);
+    M5.begin(cfg);  // the Core2's default rotation (0) is landscape
     screen("Muninn Core2", "Starting...");
 
     esp_err_t err = nvs_flash_init();

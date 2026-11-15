@@ -13,7 +13,7 @@ Core2 ──WebSocket──▶ worker (muninn-pager) ──POST /fire──▶ s
 | part | what it is | status |
 |---|---|---|
 | [`worker/`](worker/) | Cloudflare Worker with one Durable Object. Holds the task's fire token, rate-limits and dedupes events, keeps the current state, and pushes that state to connected devices | deployed at `https://muninn-pager.austegard.workers.dev`; smoke test 20/20 against a mock fire endpoint |
-| `firmware/` | ESP-IDF client for the Core2 | not started |
+| `firmware/` | ESP-IDF client for the Core2 | not started; the WhatsApp firmware in [`../whatsapp`](../whatsapp) connects to the worker instead |
 
 ## Worker API
 
@@ -29,6 +29,8 @@ them.
 | `POST /state` | session | `{state, text?, session_url?, question?}`. `state` is one of `idle starting working waiting done error`. A `question` is `{id, prompt, options: [1–3 strings], session_id?}` and needs `state: "waiting"` |
 | `GET /config`, `PUT /config` | session | `{buttons: {A, B, C}, max_fires_per_hour (1–30, default 10), dedupe_seconds (default 600)}` |
 | `GET /log` | session | the last 50 fires and refusals |
+| `POST /reply` | session | `{text}` (1–4000 chars) → 202 `{queued, id, delivered_to}`. Posts the text in the Core2's bound WhatsApp chat |
+| `GET /messages` | session | `{history, pending}`: the last 40 WhatsApp messages both ways, and replies not yet posted |
 | `GET /ws` | device, session | WebSocket, described below |
 
 On connect, the server sends `{type: "state", ...}`, and sends it again on every
@@ -40,6 +42,13 @@ change. A device sends:
   run that relays the answer to the asking session with `send_message`.
 - `{type: "get_state"}`, or the text `ping`, which gets `pong` without waking
   the Durable Object.
+- `{type: "wa_message", id, text}` (device key only): a message Oskar wrote
+  in the bound WhatsApp chat. It fires the task, deduped on `id`. If the fire
+  is refused, a notice saying why is queued for the chat.
+- `{type: "wa_sent", id}` or `{type: "wa_failed", id, error}` (device key
+  only): the outcome of a `{type: "wa_send", id, text}` the worker pushed.
+  Replies wait in a queue of 20 until the Core2 confirms them, are pushed
+  again when it reconnects, and are dropped after three failures.
 
 Every fire counts against the worker's own hourly limit, and against the
 endpoint's limits of 30 per task and 100 per account per hour. The fire

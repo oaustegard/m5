@@ -14,7 +14,9 @@ that use unofficial clients, so link a spare number rather than your own.
 | pairing (`pair-success`, device signature) and login | works: paired with an iPhone from the host build, re-login reached `<success>` |
 | prekey upload, receiving and decrypting messages (Signal sessions) | works on the Core2: paired with an iPhone and decrypted live messages (2026-11-15) |
 | ESP-IDF app: WiFi setup (over USB serial or a setup network), WebSocket, QR on screen, store in NVS | works on the Core2 |
-| sending 1:1 text messages | works on the Core2: replies to yourself and to another person delivered (2026-11-15). Groups are not supported |
+| sending 1:1 text messages | works on the Core2: replies to yourself and to another person delivered (2026-11-15) |
+| sending to groups (sender keys) | host tests pass against go.mau.fi/libsignal; not yet tried live. LID-addressed groups of up to 8 members |
+| Claude bot: one bound chat forwarded to `pager/`'s worker, replies posted back | written; not yet built |
 
 ## Layout
 
@@ -40,6 +42,9 @@ that use unofficial clients, so link a spare number rather than your own.
     a phone number by its LID (usync lookup), fetches both accounts' device
     lists, fetches prekey bundles for devices without a session, and sends one
     `<enc>` per device: the message to theirs, a `DeviceSentMessage` to ours.
+    To a group it asks for the members, encrypts the message once with our
+    sender key (`<enc type="skmsg">`), and sends every member device the
+    sender key distribution message, as whatsmeow's `sendGroup` does.
 - `main/`: the Core2 app. `provision.c` runs an open setup network
   (`Muninn-Core2`, form at http://192.168.4.1) until WiFi credentials are
   saved to NVS; `main.cpp` joins WiFi, sets the clock by SNTP, and runs the
@@ -50,6 +55,27 @@ that use unofficial clients, so link a spare number rather than your own.
   for 3 s to forget WiFi; hold C for 5 s to unlink. WiFi details can also be
   sent over USB serial as a line `WIFI <ssid><TAB><password>`.
 - `host/`: a Linux build for testing against the real servers.
+
+## Claude bot
+
+The Core2 is also the WhatsApp connection for an always-on Claude Code bot
+(`pager/` has the worker side). Because the account is a personal one, the bot
+acts in one chat only:
+
+1. In the chat you want (a group of your own, or "Message yourself"), send
+   `@claude bind` from your phone. The Core2 remembers that chat in NVS and
+   confirms there. `@claude unbind` stops it.
+2. Every text you write in that chat goes to the worker over a second
+   WebSocket (`wss://muninn-pager.austegard.workers.dev/ws`), which fires the
+   bot's scheduled task. Messages from other people, from other chats, and
+   anything older than 30 minutes (a backlog after the Core2 was off) are only
+   shown on screen.
+3. The worker pushes the session's replies back; the Core2 posts them in the
+   bound chat, prefixed with 🤖, and nowhere else.
+
+The worker's device key is compiled in from `main/bot_key.txt` (gitignored,
+one line). Without it the firmware builds with the bot off and the status line
+says `Claude: no key`.
 
 ## Host testing
 

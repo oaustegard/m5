@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Core2 firmware: joins WiFi, connects to WhatsApp, shows the pairing QR code
 // on screen, stays online as a linked device, and shows incoming messages.
+// It is also Claude's WhatsApp connection: what Oskar writes in one bound
+// chat goes to the muninn-pager worker, and the worker's replies are posted
+// back in that chat (see "bot" below).
 //
-// Threads: the WebSocket client delivers events on its own task; they go
-// through a queue to the main loop, which is the only caller of the wa core.
+// Threads: the WebSocket clients deliver events on their own tasks; they go
+// through queues to the main loop, which is the only caller of the wa core.
 //
 // Buttons (the three touch circles under the screen):
 //   hold A 3 s  forget WiFi and start the setup access point
@@ -12,6 +15,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "esp_crt_bundle.h"
@@ -22,6 +26,7 @@
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "esp_wifi.h"
+#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -139,6 +144,11 @@ static void keys_wipe(void) {
 
 static wa_client client;
 
+// Bot state shown on the status line (the bot section is further down).
+static char bot_chat[48];  // the bound chat, "" when unbound
+static bool bot_up;        // connected to the worker
+static bool bot_enabled;   // built with a device key
+
 // The newest messages, drawn newest at the bottom.
 #define INBOX 8
 struct inbox_line {
@@ -171,6 +181,13 @@ static void draw_inbox(void) {
     bool noting = note[0] && esp_timer_get_time() < note_until_us;
     d.setTextColor(noting ? TFT_ORANGE : TFT_GREEN, TFT_BLACK);
     d.drawString(noting ? note : status_line, 4, 2);
+    if (!noting) {
+        const char *b = !bot_enabled ? "Claude: no key" : !bot_chat[0] ? "Claude: unbound" : bot_up ? "Claude: on" : "Claude: offline";
+        d.setTextDatum(top_right);
+        d.setTextColor(bot_up && bot_chat[0] ? TFT_CYAN : TFT_DARKGREY, TFT_BLACK);
+        d.drawString(b, d.width() - 4, 2);
+        d.setTextDatum(top_left);
+    }
     d.drawFastHLine(0, 20, d.width(), TFT_DARKGREY);
     if (inbox_n == 0) {
         d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
@@ -241,6 +258,9 @@ static int64_t reply_until_us;
 static char reply_chat[48], reply_who[40], reply_quote[160];
 static char sending_text[40], sending_who[40];  // the reply in flight
 static bool sending;
+static bool sending_for_bot;  // the send in flight is the bot's, not a canned reply
+static void bot_on_sent(void);
+static void bot_on_send_failed(const char *why);
 
 static void draw_reply(void) {
     auto &d = M5.Display;
@@ -270,8 +290,8 @@ static void draw_reply(void) {
 }
 
 static void reply_open(const inbox_line &m) {
-    if (strstr(m.chat, "@g.us") || strstr(m.chat, "@broadcast")) {
-        set_note("Can't reply to groups yet");
+    if (strstr(m.chat, "@broadcast")) {
+        set_note("Can't reply to broadcasts");
         draw_inbox();
         return;
     }
@@ -299,6 +319,7 @@ static void reply_send(int choice) {
         set_note("Not connected; reply not sent");
     } else {
         sending = true;
+        sending_for_bot = false;
         snprintf(sending_text, sizeof sending_text, "%s", REPLIES[choice]);
         snprintf(sending_who, sizeof sending_who, "%s", reply_who);
         set_note("Sending \"%s\"...", REPLIES[choice]);
@@ -308,6 +329,7 @@ static void reply_send(int choice) {
 
 static void on_sent(void) {
     sending = false;
+    if (sending_for_bot) return bot_on_sent();
     inbox_line &m = *inbox_push();
     snprintf(m.who, sizeof m.who, "me to %.33s", sending_who);  // who[40]: "me to " + 33
     snprintf(m.text, sizeof m.text, "%s", sending_text);
@@ -318,6 +340,7 @@ static void on_sent(void) {
 
 static void on_send_failed(const char *why) {
     sending = false;
+    if (sending_for_bot) return bot_on_send_failed(why);
     set_note("Not sent: %s", why);
     draw_inbox();
 }
@@ -350,6 +373,327 @@ static void reply_input(void) {
     if (note[0] && esp_timer_get_time() >= note_until_us) {
         note[0] = 0;
         draw_inbox();
+    }
+}
+
+// ---------------------------------------------------------------- bot
+
+// The Core2 as Claude's WhatsApp connection. The account is Oskar's own, so
+// the bot acts in one chat only: the one where Oskar sent "@claude bind" from
+// his own phone. In that chat, every text he writes goes to the muninn-pager
+// worker as {type: "wa_message"}, and the worker fires the bot's Claude Code
+// task. Replies come back as {type: "wa_send"} and are posted in that same
+// chat, prefixed with a robot, and confirmed with {type: "wa_sent"}. Nothing
+// the worker sends can reach any other chat. Messages from anyone else, and
+// messages older than BOT_MAX_AGE_S (a backlog after the Core2 was off), are
+// shown but not forwarded.
+//
+// The worker's device key is compiled in from main/bot_key.txt (gitignored);
+// without that file the bot stays off.
+#define BOT_URL "wss://muninn-pager.austegard.workers.dev/ws"
+#define BOT_PREFIX "\xF0\x9F\xA4\x96 "  // U+1F916 robot face and a space
+#define BOT_MAX_AGE_S (30 * 60)
+#define BOT_OUTQ 8
+#define BOT_INQ 4
+
+static int64_t unix_time(void *);
+
+#ifdef HAVE_BOT_KEY
+extern const char bot_key_txt[] asm("_binary_bot_key_txt_start");
+#endif
+
+enum { BOT_OPEN, BOT_TEXT, BOT_CLOSE };
+struct bot_event {
+    int type;
+    char *text;
+};
+static QueueHandle_t bot_queue;
+static esp_websocket_client_handle_t bot_ws;
+static char bot_headers[128];
+
+// To post in the bound chat: replies from the worker (id set) and the bot's
+// own notices (id empty).
+struct bot_out {
+    char id[16];
+    char chat[48];
+    char *text;
+};
+static bot_out bot_outq[BOT_OUTQ];
+static int bot_outq_n;
+static char bot_sent_ids[8][16];  // recently posted, in case the worker sends one again
+static int bot_sent_next;
+static int64_t bot_retry_at_us;
+
+// Messages for the worker while it is unreachable.
+struct bot_in {
+    char id[32];
+    char *text;
+};
+static bot_in bot_inq[BOT_INQ];
+static int bot_inq_n;
+
+static void bot_ws_handler(void *, esp_event_base_t, int32_t id, void *event_data) {
+    auto *e = (esp_websocket_event_data_t *)event_data;
+    static char *buf;  // a text frame larger than the client's buffer arrives in pieces
+    bot_event ev = {};
+    switch (id) {
+        case WEBSOCKET_EVENT_CONNECTED:
+            ev.type = BOT_OPEN;
+            break;
+        case WEBSOCKET_EVENT_DATA:
+            if (e->op_code != 0x1 || e->payload_len <= 0 || e->payload_len > 16384) return;
+            if (e->payload_offset == 0) {
+                free(buf);
+                buf = (char *)malloc(e->payload_len + 1);
+            }
+            if (!buf || e->payload_offset + e->data_len > e->payload_len) return;
+            memcpy(buf + e->payload_offset, e->data_ptr, e->data_len);
+            if (e->payload_offset + e->data_len < e->payload_len) return;
+            buf[e->payload_len] = 0;
+            ev.type = BOT_TEXT;
+            ev.text = buf;
+            buf = NULL;
+            break;
+        case WEBSOCKET_EVENT_DISCONNECTED:
+        case WEBSOCKET_EVENT_CLOSED:
+        case WEBSOCKET_EVENT_ERROR:
+            ev.type = BOT_CLOSE;
+            break;
+        default:
+            return;
+    }
+    if (xQueueSend(bot_queue, &ev, pdMS_TO_TICKS(100)) != pdTRUE) free(ev.text);
+}
+
+static void bot_load(void) {
+    nvs_handle_t h;
+    if (nvs_open("bot", NVS_READONLY, &h) != ESP_OK) return;
+    size_t len = sizeof bot_chat;
+    if (nvs_get_str(h, "chat", bot_chat, &len) != ESP_OK) bot_chat[0] = 0;
+    nvs_close(h);
+}
+
+static void bot_save(void) {
+    nvs_handle_t h;
+    if (nvs_open("bot", NVS_READWRITE, &h) != ESP_OK) return;
+    if (bot_chat[0])
+        nvs_set_str(h, "chat", bot_chat);
+    else
+        nvs_erase_key(h, "chat");
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void bot_start(void) {
+#ifdef HAVE_BOT_KEY
+    char key[96];
+    snprintf(key, sizeof key, "%s", bot_key_txt);
+    key[strcspn(key, " \r\n\t")] = 0;
+    bot_enabled = key[0] != 0;
+    if (!bot_enabled) return;
+    snprintf(bot_headers, sizeof bot_headers, "Authorization: Bearer %s\r\n", key);
+    memset(key, 0, sizeof key);
+    bot_queue = xQueueCreate(16, sizeof(bot_event));
+    esp_websocket_client_config_t cfg = {};
+    cfg.uri = BOT_URL;
+    cfg.headers = bot_headers;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size = 4096;
+    cfg.task_stack = 6144;
+    cfg.network_timeout_ms = 20000;
+    cfg.reconnect_timeout_ms = 10000;
+    cfg.ping_interval_sec = 30;
+    bot_ws = esp_websocket_client_init(&cfg);
+    esp_websocket_register_events(bot_ws, WEBSOCKET_EVENT_ANY, bot_ws_handler, NULL);
+    esp_websocket_client_start(bot_ws);
+#endif
+}
+
+static bool bot_send_json(cJSON *o) {
+    bool ok = false;
+    char *s = cJSON_PrintUnformatted(o);
+    if (s && bot_ws && esp_websocket_client_is_connected(bot_ws))
+        ok = esp_websocket_client_send_text(bot_ws, s, strlen(s), pdMS_TO_TICKS(5000)) >= 0;
+    free(s);
+    cJSON_Delete(o);
+    return ok;
+}
+
+static void bot_report(const char *type, const char *id, const char *error) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", type);
+    cJSON_AddStringToObject(o, "id", id);
+    if (error) cJSON_AddStringToObject(o, "error", error);
+    bot_send_json(o);
+}
+
+static bool bot_forward(const char *id, const char *text) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", "wa_message");
+    cJSON_AddStringToObject(o, "id", id);
+    cJSON_AddStringToObject(o, "text", text);
+    return bot_send_json(o);
+}
+
+// Queue text for chat (a reply when id is set, else a notice).
+static void bot_post(const char *id, const char *chat, const char *text) {
+    if (!chat[0]) return;
+    for (int i = 0; id[0] && i < bot_outq_n; i++)
+        if (strcmp(bot_outq[i].id, id) == 0) return;  // already queued
+    for (int i = 0; id[0] && i < 8; i++)
+        if (strcmp(bot_sent_ids[i], id) == 0) return bot_report("wa_sent", id, NULL);  // posted; our ack was lost
+    if (bot_outq_n == BOT_OUTQ) {
+        if (id[0]) bot_report("wa_failed", id, "Core2 queue full");
+        return;
+    }
+    char *t = (char *)malloc(strlen(BOT_PREFIX) + strlen(text) + 1);
+    if (!t) return;
+    strcpy(t, BOT_PREFIX);
+    strcat(t, text);
+    bot_out &o = bot_outq[bot_outq_n++];
+    snprintf(o.id, sizeof o.id, "%s", id);
+    snprintf(o.chat, sizeof o.chat, "%s", chat);
+    o.text = t;
+}
+
+static void bot_pop(void) {
+    free(bot_outq[0].text);
+    memmove(&bot_outq[0], &bot_outq[1], sizeof bot_outq[0] * (BOT_OUTQ - 1));
+    bot_outq_n--;
+}
+
+static void bot_on_sent(void) {
+    if (!bot_outq_n) return;
+    bot_out &o = bot_outq[0];
+    if (o.id[0]) {
+        bot_report("wa_sent", o.id, NULL);
+        snprintf(bot_sent_ids[bot_sent_next++ % 8], sizeof bot_sent_ids[0], "%s", o.id);
+    }
+    inbox_line &m = *inbox_push();
+    snprintf(m.who, sizeof m.who, "Claude");
+    snprintf(m.text, sizeof m.text, "%s", o.text + strlen(BOT_PREFIX));
+    snprintf(m.chat, sizeof m.chat, "%s", o.chat);
+    bot_pop();
+    if (!replying) draw_inbox();
+}
+
+static void bot_on_send_failed(const char *why) {
+    if (!bot_outq_n) return;
+    if (bot_outq[0].id[0]) bot_report("wa_failed", bot_outq[0].id, why);
+    set_note("Claude's reply not sent: %s", why);
+    bot_pop();
+    if (!replying) draw_inbox();
+}
+
+static bool bot_cmd(const char *text, const char *cmd) {
+    while (*text == ' ' || *text == '\n') text++;
+    size_t n = strlen(cmd);
+    if (strncasecmp(text, cmd, n) != 0) return false;
+    for (text += n; *text; text++)
+        if (*text != ' ' && *text != '\n') return false;
+    return true;
+}
+
+// Every message the wa core decrypts passes through here.
+static void bot_on_message(const wa_message *msg) {
+    if (!bot_enabled || !msg->from_me || !msg->text || !msg->kind || strcmp(msg->kind, "text") != 0) return;
+    if (bot_cmd(msg->text, "@claude bind")) {
+        snprintf(bot_chat, sizeof bot_chat, "%s", msg->chat);
+        bot_save();
+        bot_post("", bot_chat, "Bound. What you write in this chat now goes to Claude. Send @claude unbind to stop.");
+        set_note("Claude bound to this chat");
+        return;
+    }
+    if (!bot_chat[0] || strcmp(msg->chat, bot_chat) != 0) return;
+    if (bot_cmd(msg->text, "@claude unbind")) {
+        bot_post("", bot_chat, "Unbound. Claude no longer reads this chat.");
+        bot_chat[0] = 0;
+        bot_save();
+        set_note("Claude unbound");
+        return;
+    }
+    if (strncmp(msg->text, BOT_PREFIX, strlen(BOT_PREFIX)) == 0) return;  // one of ours
+    int64_t now = unix_time(NULL);
+    if (now && msg->timestamp && now - msg->timestamp > BOT_MAX_AGE_S) {
+        ESP_LOGI(TAG, "bot: not forwarding %s, %lld s old", msg->id, (long long)(now - msg->timestamp));
+        return;
+    }
+    if (bot_up && bot_forward(msg->id, msg->text)) return;
+    if (bot_inq_n == BOT_INQ) {
+        bot_post("", bot_chat, "The Core2 can't reach Claude right now; this message was not delivered.");
+        return;
+    }
+    bot_in &q = bot_inq[bot_inq_n];
+    q.text = strdup(msg->text);
+    if (!q.text) return;
+    snprintf(q.id, sizeof q.id, "%s", msg->id);
+    bot_inq_n++;
+}
+
+static void bot_on_text(const char *text) {
+    cJSON *o = cJSON_Parse(text);
+    if (!o) return;  // e.g. "pong"
+    const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(o, "type"));
+    const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(o, "id"));
+    const char *t = cJSON_GetStringValue(cJSON_GetObjectItem(o, "text"));
+    if (!type) {
+    } else if (strcmp(type, "wa_send") == 0 && id && t) {
+        if (bot_chat[0])
+            bot_post(id, bot_chat, t);
+        else
+            bot_report("wa_failed", id, "no chat is bound on the Core2");
+    } else if (strcmp(type, "state") == 0) {
+        const char *st = cJSON_GetStringValue(cJSON_GetObjectItem(o, "state"));
+        if (st && strcmp(st, "idle") != 0 && t && t[0]) {
+            set_note("Claude %s: %.40s", st, t);
+            if (!replying) draw_inbox();
+        }
+    } else if (strcmp(type, "ack") == 0) {
+        cJSON *fired = cJSON_GetObjectItem(o, "fired");
+        const char *reason = cJSON_GetStringValue(cJSON_GetObjectItem(o, "reason"));
+        if (fired && cJSON_IsFalse(fired) && reason && strcmp(reason, "duplicate") != 0) {
+            set_note("Claude not reached: %s", reason);
+            if (!replying) draw_inbox();
+        }
+    }
+    cJSON_Delete(o);
+}
+
+// From the main loop: worker events, the waiting queue, the next post.
+static void bot_poll(void) {
+    if (!bot_queue) return;
+    bot_event ev;
+    while (xQueueReceive(bot_queue, &ev, 0) == pdTRUE) {
+        switch (ev.type) {
+            case BOT_OPEN:
+                ESP_LOGI(TAG, "bot: connected to the worker");
+                bot_up = true;
+                if (!replying) draw_inbox();
+                break;
+            case BOT_CLOSE:
+                if (bot_up) {
+                    ESP_LOGW(TAG, "bot: disconnected from the worker");
+                    bot_up = false;
+                    if (!replying) draw_inbox();
+                }
+                break;
+            case BOT_TEXT:
+                bot_on_text(ev.text);
+                break;
+        }
+        free(ev.text);
+    }
+    while (bot_up && bot_inq_n && bot_forward(bot_inq[0].id, bot_inq[0].text)) {
+        free(bot_inq[0].text);
+        memmove(&bot_inq[0], &bot_inq[1], sizeof bot_inq[0] * (BOT_INQ - 1));
+        bot_inq_n--;
+    }
+    if (sending || !bot_outq_n || !client.logged_in || esp_timer_get_time() < bot_retry_at_us) return;
+    if (wa_client_send_text(&client, bot_outq[0].chat, bot_outq[0].text)) {
+        sending = true;
+        sending_for_bot = true;
+    } else {
+        bot_retry_at_us = esp_timer_get_time() + 2000000;  // not connected or the chat is not sendable
     }
 }
 
@@ -469,7 +813,7 @@ static void on_event(void *, const wa_event *ev) {
             schedule_reconnect(5000);
             break;
         case WA_EV_LOGGED_IN:
-            snprintf(status_line, sizeof status_line, "Online: +%s (device %u)", store.user, store.device);
+            snprintf(status_line, sizeof status_line, "Online +%s", store.user);  // the right side shows the bot
             draw_inbox();
             break;
         case WA_EV_LOGGED_OUT:
@@ -483,6 +827,7 @@ static void on_event(void *, const wa_event *ev) {
                 inbox_add(ev->msg);
                 if (replying) draw_reply();  // keep the reply screen up
             }
+            bot_on_message(ev->msg);
             break;
         case WA_EV_UNDECRYPTABLE:
             ESP_LOGW(TAG, "undecryptable message from %s: %s", ev->msg->sender, ev->text);
@@ -637,6 +982,9 @@ extern "C" void app_main(void) {
     wa_callbacks cb = {ws_send, on_event, store_save, now_ms, unix_time, log_cb, NULL, {kv_get, kv_set, kv_del, NULL}};
     wa_client_init(&client, &store, &cb);
 
+    bot_load();
+    bot_start();
+
     screen("Connecting", "web.whatsapp.com");
     ws_start();
 
@@ -660,6 +1008,7 @@ extern "C" void app_main(void) {
             free(ev.data);
         }
         wa_client_tick(&client);
+        bot_poll();
 
         if (want_reconnect && esp_timer_get_time() >= reconnect_at_us) {
             want_reconnect = false;

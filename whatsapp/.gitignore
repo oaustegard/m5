@@ -10,3 +10,4 @@ managed_components/
 dependencies.lock
 host/*.keys/
 host/sigpeer/sigpeer
+main/bot_key.txt

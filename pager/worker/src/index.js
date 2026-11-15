@@ -8,6 +8,13 @@
 // One Durable Object instance ("main") holds all state, so the rate limit,
 // the pending question and the socket list are consistent.
 //
+// WhatsApp: the Core2 (whatsapp/ firmware) is linked to Oskar's WhatsApp and
+// forwards the messages he writes in one bound group as {type: "wa_message"}
+// over the WebSocket. Each one fires the task. A session answers with
+// POST /reply; the worker queues the text and pushes it to the Core2 as
+// {type: "wa_send"}, and the Core2 posts it in that group and confirms with
+// {type: "wa_sent"}. Undelivered replies wait for the Core2 to reconnect.
+//
 // Routes                     auth            purpose
 //   GET  /health             none            liveness
 //   POST /event              device|session  fire the task with {text}
@@ -16,6 +23,8 @@
 //   GET  /config             session         button prompts, rate limit
 //   PUT  /config             session         change them
 //   GET  /log                session         recent fires and refusals
+//   POST /reply              session         post {text} in the bound WhatsApp group
+//   GET  /messages           session         the recent WhatsApp conversation, both ways
 //   GET  /ws                 device|session  WebSocket for the Core2
 //
 // Secrets: DEVICE_KEY, SESSION_KEY, ROUTINE_TOKEN. Vars: ROUTINE_ID,
@@ -39,6 +48,10 @@ const MAX_TEXT = 8000;
 const MAX_STATE_TEXT = 500;
 const LOG_KEEP = 50;
 const ANTHROPIC_FIRE = "https://api.anthropic.com/v1/claude_code/routines";
+const MAX_REPLY = 4000;
+const OUTBOX_KEEP = 20;
+const HISTORY_KEEP = 40;
+const SEND_ATTEMPTS = 3;
 
 const json = (body, status = 200, headers = {}) =>
   new Response(JSON.stringify(body), {
@@ -151,6 +164,39 @@ export class Pager extends DurableObject {
     await this.ctx.storage.put("log", log.slice(0, LOG_KEEP));
   }
 
+  async history(entry) {
+    const h = (await this.ctx.storage.get("history")) || [];
+    h.push({ at: new Date().toISOString(), ...entry });
+    await this.ctx.storage.put("history", h.slice(-HISTORY_KEEP));
+  }
+
+  devices() {
+    return this.ctx.getWebSockets("device");
+  }
+
+  // Queue a message for the bound WhatsApp group and push it to every
+  // connected Core2. Returns the queued item and how many devices got it.
+  async enqueue(text, kind) {
+    const outbox = (await this.ctx.storage.get("outbox")) || [];
+    const item = { id: crypto.randomUUID().slice(0, 8), text, kind, at: new Date().toISOString(), attempts: 0 };
+    outbox.push(item);
+    await this.ctx.storage.put("outbox", outbox.slice(-OUTBOX_KEEP));
+    let n = 0;
+    for (const ws of this.devices()) {
+      try {
+        ws.send(JSON.stringify({ type: "wa_send", id: item.id, text: item.text }));
+        n++;
+      } catch {}
+    }
+    return { item, delivered_to: n };
+  }
+
+  async flushOutbox(ws) {
+    for (const item of (await this.ctx.storage.get("outbox")) || []) {
+      ws.send(JSON.stringify({ type: "wa_send", id: item.id, text: item.text }));
+    }
+  }
+
   // Rate limit, dedupe, then POST to the task's fire endpoint.
   // Returns {fired, reason?, retry_after?, session_id?, session_url?, status?}.
   async fire(source, text, dedupeKey) {
@@ -251,6 +297,7 @@ export class Pager extends DurableObject {
       const { 0: client, 1: server } = new WebSocketPair();
       this.ctx.acceptWebSocket(server, [role]);
       server.send(JSON.stringify({ type: "state", ...(await this.state()) }));
+      if (role === "device") await this.flushOutbox(server);
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -305,6 +352,23 @@ export class Pager extends DurableObject {
       case "GET /log":
         if (role !== "session") return json({ error: "session key required" }, 403);
         return json((await this.ctx.storage.get("log")) || []);
+
+      case "POST /reply": {
+        if (role !== "session") return json({ error: "session key required" }, 403);
+        const b = await readJson(request);
+        if (!b || typeof b.text !== "string" || !b.text.trim() || b.text.length > MAX_REPLY) {
+          return json({ error: `body must be {text: string, 1..${MAX_REPLY} chars}` }, 400);
+        }
+        const { item, delivered_to } = await this.enqueue(b.text, "reply");
+        return json({ queued: true, id: item.id, delivered_to }, 202);
+      }
+
+      case "GET /messages":
+        if (role !== "session") return json({ error: "session key required" }, 403);
+        return json({
+          history: (await this.ctx.storage.get("history")) || [],
+          pending: (await this.ctx.storage.get("outbox")) || [],
+        });
     }
     return json({ error: "not found" }, 404);
   }
@@ -341,6 +405,47 @@ export class Pager extends DurableObject {
       // The answer is unique per question, so dedupe on the question id.
       const r = await this.fire("core2-answer", text, `answer:${q.id}`);
       return reply({ type: "ack", ...r });
+    }
+
+    if (m.type === "wa_message") {
+      if (!this.ctx.getTags(ws).includes("device")) return reply({ type: "error", error: "device key required" });
+      if (typeof m.id !== "string" || !m.id || m.id.length > 64) return reply({ type: "error", error: "id must be a 1..64 char string" });
+      if (typeof m.text !== "string" || !m.text.trim() || m.text.length > MAX_TEXT) {
+        return reply({ type: "error", error: `text must be a 1..${MAX_TEXT} char string` });
+      }
+      const seen = ((await this.ctx.storage.get("history")) || []).some((h) => h.dir === "in" && h.id === m.id);
+      if (!seen) await this.history({ dir: "in", id: m.id, text: m.text });
+      const text = [
+        "Oskar wrote in the WhatsApp bot group (forwarded by the Core2):",
+        "---",
+        m.text,
+        "---",
+        "Answer him in the group with POST /reply {text}. GET /messages has the recent conversation.",
+      ].join("\n");
+      const r = await this.fire("whatsapp", text, `wa:${m.id}`);
+      if (!r.fired && r.reason !== "duplicate") {
+        const wait = r.retry_after ? ` Try again in ${Math.ceil(r.retry_after / 60)} min.` : "";
+        await this.enqueue(`Not delivered to Claude (${r.reason}).${wait}`, "notice");
+      }
+      return reply({ type: "ack", id: m.id, ...r });
+    }
+
+    if (m.type === "wa_sent" || m.type === "wa_failed") {
+      if (!this.ctx.getTags(ws).includes("device")) return reply({ type: "error", error: "device key required" });
+      const outbox = (await this.ctx.storage.get("outbox")) || [];
+      const i = outbox.findIndex((o) => o.id === m.id);
+      if (i < 0) return;
+      const item = outbox[i];
+      if (m.type === "wa_sent") {
+        outbox.splice(i, 1);
+        await this.history({ dir: "out", id: item.id, kind: item.kind, text: item.text });
+      } else {
+        item.attempts++;
+        await this.log({ source: "whatsapp", sent: false, reason: String(m.error || "failed").slice(0, 120), id: item.id });
+        if (item.attempts >= SEND_ATTEMPTS) outbox.splice(i, 1);
+      }
+      await this.ctx.storage.put("outbox", outbox);
+      return;
     }
 
     if (m.type === "get_state") {

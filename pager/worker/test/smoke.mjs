@@ -300,6 +300,98 @@ try {
     }
   });
 
+  // Skip state broadcasts and the like until a message of the given type.
+  const nextOf = async (conn, type) => {
+    for (let i = 0; i < 10; i++) {
+      const m = await conn.next();
+      if (m.type === type) return m;
+    }
+    throw new Error(`no ${type} message`);
+  };
+
+  await check("WS wa_message fires the task with Oskar's text and acks", async () => {
+    const n = fires.length;
+    dev1.send({ type: "wa_message", id: "3EB0AAA", text: "what's on my calendar?" });
+    const ack = await nextOf(dev1, "ack");
+    assert.ok(ack.fired && ack.id === "3EB0AAA", JSON.stringify(ack));
+    assert.equal(fires.length, n + 1);
+    assert.match(fires.at(-1).body.text, /source: whatsapp\n.*---\nOskar wrote in the WhatsApp bot group.*\nwhat's on my calendar\?\n/s);
+  });
+
+  await check("WS wa_message with a seen id is a duplicate and fires nothing", async () => {
+    const n = fires.length;
+    dev1.send({ type: "wa_message", id: "3EB0AAA", text: "what's on my calendar?" });
+    const ack = await nextOf(dev1, "ack");
+    assert.equal(ack.reason, "duplicate");
+    assert.equal(fires.length, n);
+  });
+
+  await check("WS wa_message validates id and text", async () => {
+    dev1.send({ type: "wa_message", id: "", text: "x" });
+    assert.equal((await nextOf(dev1, "error")).type, "error");
+    dev1.send({ type: "wa_message", id: "3EB0BBB", text: "   " });
+    assert.equal((await nextOf(dev1, "error")).type, "error");
+  });
+
+  await check("POST /reply needs the session key and a text", async () => {
+    assert.equal((await call("POST", "/reply", { key: DEVICE, body: { text: "x" } })).status, 403);
+    assert.equal((await call("POST", "/reply", { key: SESSION, body: { text: "" } })).status, 400);
+    assert.equal((await call("POST", "/reply", { key: SESSION, body: { text: "x".repeat(4001) } })).status, 400);
+  });
+
+  await check("POST /reply pushes wa_send to the Core2; wa_sent moves it to history", async () => {
+    const r = await call("POST", "/reply", { key: SESSION, body: { text: "Two meetings today." } });
+    assert.equal(r.status, 202);
+    assert.equal(r.body.delivered_to, 1);
+    const m = await nextOf(dev1, "wa_send");
+    assert.equal(m.text, "Two meetings today.");
+    assert.equal(m.id, r.body.id);
+    dev1.send({ type: "wa_sent", id: m.id });
+    await new Promise((res) => setTimeout(res, 200));
+    const h = await call("GET", "/messages", { key: SESSION });
+    assert.equal(h.body.pending.length, 0, JSON.stringify(h.body));
+    const dirs = h.body.history.map((e) => `${e.dir}:${e.text}`);
+    assert.deepEqual(dirs.slice(-2), ["in:what's on my calendar?", "out:Two meetings today."]);
+    assert.equal((await call("GET", "/messages", { key: DEVICE })).status, 403);
+  });
+
+  await check("a reply queued while the Core2 is away arrives when it reconnects", async () => {
+    dev1.ws.close();
+    await new Promise((res) => setTimeout(res, 300));
+    const r = await call("POST", "/reply", { key: SESSION, body: { text: "Queued for later." } });
+    assert.equal(r.body.delivered_to, 0);
+    dev1 = await openWs(DEVICE);
+    assert.equal((await dev1.next()).type, "state");
+    const m = await dev1.next();
+    assert.equal(m.type, "wa_send");
+    assert.equal(m.text, "Queued for later.");
+    // A failed post stays queued until it has failed three times.
+    for (let i = 0; i < 3; i++) dev1.send({ type: "wa_failed", id: m.id, error: "not connected" });
+    await new Promise((res) => setTimeout(res, 300));
+    const h = await call("GET", "/messages", { key: SESSION });
+    assert.equal(h.body.pending.length, 0);
+  });
+
+  await check("a wa_message that cannot fire queues a notice for the group", async () => {
+    mockStatus = 429;
+    dev1.send({ type: "wa_message", id: "3EB0CCC", text: "are you there?" });
+    // The notice goes out before the ack.
+    const m = await nextOf(dev1, "wa_send");
+    const ack = await nextOf(dev1, "ack");
+    assert.equal(ack.reason, "upstream_rate_limited");
+    assert.match(m.text, /^Not delivered to Claude \(upstream_rate_limited\)\. Try again in 2 min\.$/);
+    mockStatus = 200;
+    dev1.send({ type: "wa_sent", id: m.id });
+  });
+
+  await check("a session socket cannot send wa_message", async () => {
+    const s = await openWs(SESSION);
+    await s.next();
+    s.send({ type: "wa_message", id: "3EB0DDD", text: "spoof" });
+    assert.equal((await nextOf(s, "error")).error, "device key required");
+    s.ws.close();
+  });
+
   await check("unknown route 404", async () => {
     assert.equal((await call("GET", "/nope", { key: SESSION })).status, 404);
   });

@@ -480,11 +480,15 @@ static void haptic_watch_player(void)
 // In game:   tilt = move/turn, touch screen = fire,
 //            A = use (hold 1.2 s: re-centre tilt), B = next weapon,
 //            C = automap (hold: menu).
-// In menus:  A = up, C = down (hold: back), B = select, tilt fwd/back =
-//            up/down; tap an item to point at it, tap it again to select
-//            (left/right third on a slider = slider left/right).
+// In menus:  A = down, B = up (both repeat while held), tap = select
+//            (on a slider row or a setup screen: left/right third = slider
+//            left/right, middle = select), C = back (closes the main menu).
+//            Yes/no prompts: tap = yes, C = no.
 
 enum { BTN_A, BTN_B, BTN_C, BTN_TOUCH, BTN_COUNT };
+
+#define MENU_REPEAT_DELAY_MS 400
+#define MENU_REPEAT_MS       150
 
 static float neutral_x, neutral_y;
 static bool neutral_set = false;
@@ -514,10 +518,12 @@ static int key_for(int button, bool in_menu, int touch_x)
     {
         switch (button)
         {
-        case BTN_A: return key_menu_up;
-        case BTN_B: return key_enter;
-        case BTN_C: return key_menu_down;
+        case BTN_A: return key_menu_down;
+        case BTN_B: return key_menu_up;
+        case BTN_C: return M_AtTopMenu() ? key_escape : key_backspace;
         case BTN_TOUCH:
+            if (!M_TapUsesThirds())
+                return key_enter;
             if (touch_x < HAL_SCREEN_W / 3)
                 return key_menu_left;
             if (touch_x > HAL_SCREEN_W * 2 / 3)
@@ -538,83 +544,13 @@ static int key_for(int button, bool in_menu, int touch_x)
     return 0;
 }
 
-// A touch in a big-font menu: tapping an item moves the skull to it, and
-// tapping the item the skull is on selects it (or, on a slider, nudges it
-// left or right from the outer thirds of the screen). Setup screens and
-// yes/no messages keep the thirds layout from key_for. Returns 0 for "no key".
-static int menu_touch_key(int x, int y)
-{
-    int item = M_TouchItemAt(y);
-    if (item == -2)
-        return key_for(BTN_TOUCH, true, x);
-    if (item == -1)
-        return 0;
-    if (item != M_ItemOn())
-    {
-        M_SetItemOn(item);
-        return 0;
-    }
-    if (M_ItemIsSlider(item))
-    {
-        if (x < HAL_SCREEN_W / 3)
-            return key_menu_left;
-        if (x > HAL_SCREEN_W * 2 / 3)
-            return key_menu_right;
-    }
-    return key_enter;
-}
-
-// In menus, tilting forward/back past the dead zone steps the cursor up or
-// down, once on entering the tilt and then every MENU_TILT_REPEAT_MS. Tilt
-// must pass through neutral after a menu opens before it counts, so a
-// menu opened mid-game while leaning does not start scrolling.
-#define MENU_TILT_REPEAT_MS 250
-
-static void menu_tilt(const hal_input_t *in, bool in_menu, int64_t t)
-{
-    static bool was_in_menu, armed;
-    static int dir;
-    static int64_t next_ms;
-
-    if (!in_menu || !in->imu_ok || !neutral_set)
-    {
-        was_in_menu = false;
-        dir = 0;
-        return;
-    }
-    if (!was_in_menu)
-    {
-        was_in_menu = true;
-        armed = false;
-        dir = 0;
-    }
-
-    float v = TILT_MOVE_SIGN * tilt_axis(in->ay - neutral_y);   // + = forward = up
-    int now = v > 0 ? 1 : v < 0 ? -1 : 0;
-    if (now == 0)
-    {
-        armed = true;
-        dir = 0;
-        return;
-    }
-    if (!armed)
-        return;
-    if (now != dir || t >= next_ms)
-    {
-        int key = now > 0 ? key_menu_up : key_menu_down;
-        post_key(ev_keydown, key);
-        post_key(ev_keyup, key);
-        next_ms = t + MENU_TILT_REPEAT_MS;
-        dir = now;
-    }
-}
-
 void I_StartTic(void)
 {
     static bool prev[BTN_COUNT];
     static int held_key[BTN_COUNT];
     static int64_t press_ms[BTN_COUNT];
     static bool long_fired[BTN_COUNT];
+    static int64_t repeat_ms[BTN_COUNT];
 
     hal_input_t in;
     hal_input_read(&in);
@@ -630,9 +566,18 @@ void I_StartTic(void)
             press_ms[b] = t;
             long_fired[b] = false;
 
-            // C waits to tell a tap from a hold; everything else acts at once
-            if (b != BTN_C)
+            // In game, C waits to tell a tap from a hold; in menus it is "back"
+            // and acts at once, like everything else
+            if (b == BTN_C && in_menu)
             {
+                int key = key_for(b, true, in.touch_x);
+                post_key(ev_keydown, key);
+                post_key(ev_keyup, key);
+                long_fired[b] = true;
+            }
+            else if (b != BTN_C)
+            {
+                repeat_ms[b] = t + MENU_REPEAT_DELAY_MS;
                 // As on PC Doom, any press during a demo opens the menu
                 bool in_demo = !in_menu && (demoplayback || gamestate == GS_DEMOSCREEN);
                 // Dead, B or touch restarts the level the way "use" (A) does
@@ -640,11 +585,18 @@ void I_StartTic(void)
                             players[consoleplayer].playerstate == PST_DEAD;
                 held_key[b] = in_demo ? key_escape
                             : dead    ? key_use
-                            : b == BTN_TOUCH && in_menu ? menu_touch_key(in.touch_x, in.touch_y)
                                       : key_for(b, in_menu, in.touch_x);
                 if (held_key[b])
                     post_key(ev_keydown, held_key[b]);
             }
+        }
+        else if (now[b] && prev[b] && in_menu && (b == BTN_A || b == BTN_B) &&
+                 held_key[b] == key_for(b, true, 0) && t >= repeat_ms[b])
+        {
+            // A and B repeat the cursor step while held in a menu
+            post_key(ev_keyup, held_key[b]);
+            post_key(ev_keydown, held_key[b]);
+            repeat_ms[b] = t + MENU_REPEAT_MS;
         }
         else if (now[b] && prev[b] && !long_fired[b])
         {
@@ -690,8 +642,6 @@ void I_StartTic(void)
         if (gamestate == GS_LEVEL)
             players[consoleplayer].message = muted ? "SOUND OFF" : "SOUND ON";
     }
-
-    menu_tilt(&in, in_menu, t);
 
     analog_turn = 0;
     analog_forward = 0;

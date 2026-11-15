@@ -2275,43 +2275,17 @@ void M_Drawer(void)
   }
 }
 
-// m5: touch support for the Core2 (see m_menu.h)
-int M_TouchItemAt(int screen_y)
+// m5: Core2 controls (see m_menu.h)
+bool M_TapUsesThirds(void)
 {
-  if (!menuactive || messageToPrint || setup_active)
-    return -2;
-  // One-item menus (the Read This! pages) fill the screen: any tap is it
-  if (currentMenu->numitems == 1)
-    return 0;
-  // Big-font menus are drawn stretched from 320x200, with no vertical offset
-  int y = screen_y * 200 / SCREENHEIGHT;
-  // An item's row starts a little above its patch, where the skull is drawn
-  int top = currentMenu->y - 5;
-  if (y < top)
-    return -1;
-  int item = (y - top) / LINEHEIGHT;
-  if (item >= currentMenu->numitems || currentMenu->menuitems[item].status == -1)
-    return -1;
-  return item;
+  if (!menuactive || messageToPrint)
+    return false;
+  return setup_active || currentMenu->menuitems[itemOn].status == 2;
 }
 
-int M_ItemOn(void)
+bool M_AtTopMenu(void)
 {
-  return itemOn;
-}
-
-bool M_ItemIsSlider(int item)
-{
-  return item >= 0 && item < currentMenu->numitems &&
-    currentMenu->menuitems[item].status == 2;
-}
-
-void M_SetItemOn(int item)
-{
-  if (item < 0 || item >= currentMenu->numitems || item == itemOn)
-    return;
-  itemOn = item;
-  S_StartSound(NULL, sfx_pstop);
+  return menuactive && !messageToPrint && !setup_active && !currentMenu->prevMenu;
 }
 
 void M_Ticker(void)

@@ -132,22 +132,23 @@ static void draw_setup_text(bool imu_ok)
         {"", "hold: menu"},
         {"Dead?", "tap to restart"},
         {"Power", "mute / unmute"},
-        {"Menus", "tilt, or tap twice"},
+        {"Menus", "A down, B up"},
+        {"", "tap: ok, C: back"},
     };
-    int y = 48;
+    int y = 46;
     for (const auto &l : lines)
     {
         d.setTextColor(TFT_ORANGE, TFT_BLACK);
         d.drawString(l[0], 184, y);
         d.setTextColor(TFT_WHITE, TFT_BLACK);
         d.drawString(l[1], l[0][0] ? 232 : 196, y);
-        y += 17;
+        y += 16;
     }
 
     d.setTextColor(TFT_DARKGREY, TFT_BLACK);
     d.drawString(imu_ok ? "dot = tilt, rings = dead zone / full speed"
                         : "no motion sensor: tilt is off",
-                 6, 222);
+                 6, 224);
 }
 
 extern "C" bool hal_setup_screen(const hal_setup_t *cfg, float *neutral_x, float *neutral_y)

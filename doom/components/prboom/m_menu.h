@@ -67,14 +67,12 @@ void M_Init (void);
 
 void M_StartControlPanel (void);
 
-// m5: touch support for the Core2. M_TouchItemAt maps a screen y (in
-// SCREENHEIGHT pixels) to the item drawn there in the current big-font
-// menu: the item index, -1 for no selectable item, or -2 when a setup
-// screen or message is up (the caller should fall back to keys).
-int M_TouchItemAt(int screen_y);
-int M_ItemOn(void);
-bool M_ItemIsSlider(int item);
-void M_SetItemOn(int item);   // moves the skull and plays the cursor sound
+// m5: Core2 controls. M_TapUsesThirds says whether a tap should map to
+// left / select / right by screen third (a slider row or a setup screen)
+// rather than plain select. M_AtTopMenu says whether "back" would have
+// nowhere to go, so the caller closes the menu instead.
+bool M_TapUsesThirds(void);
+bool M_AtTopMenu(void);
 
 void M_ForcedLoadGame(const char *msg); // killough 5/15/98: forced loadgames
 

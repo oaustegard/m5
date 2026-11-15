@@ -26,3 +26,9 @@ CONFIG_MBEDTLS_HARDWARE_MPI=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# Sends must not wait on the receive task: with one shared lock the (higher
+# priority) receive task starves app_main during a burst of offline messages,
+# acks and the prekey upload time out, and the server drops the connection.
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=10000

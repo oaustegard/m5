@@ -207,6 +207,7 @@ struct ws_event {
     size_t len;
 };
 static QueueHandle_t ws_queue;
+static volatile bool ws_stopping;  // ws_stop() is draining: don't block the WebSocket task
 static esp_websocket_client_handle_t ws;
 
 static void ws_handler(void *, esp_event_base_t, int32_t id, void *event_data) {
@@ -234,7 +235,9 @@ static void ws_handler(void *, esp_event_base_t, int32_t id, void *event_data) {
         default:
             return;
     }
-    if (xQueueSend(ws_queue, &ev, pdMS_TO_TICKS(1000)) != pdTRUE) free(ev.data);
+    // Never drop a data chunk: a missing chunk desyncs the WhatsApp frame stream for
+    // the rest of the connection. Block the WebSocket task until app_main catches up.
+    if (xQueueSend(ws_queue, &ev, ev.type == EV_DATA && !ws_stopping ? portMAX_DELAY : pdMS_TO_TICKS(100)) != pdTRUE) free(ev.data);
 }
 
 static int ws_send(void *, const uint8_t *data, size_t len) {
@@ -265,11 +268,14 @@ static void ws_start(void) {
 }
 
 static void ws_stop(void) {
+    ws_stopping = true;
+    ws_event ev;
+    while (xQueueReceive(ws_queue, &ev, 0) == pdTRUE) free(ev.data);  // unblock the WebSocket task
     if (ws && esp_websocket_client_is_connected(ws)) esp_websocket_client_close(ws, pdMS_TO_TICKS(2000));
     if (ws) esp_websocket_client_stop(ws);
     // Drop anything still queued from the old connection.
-    ws_event ev;
     while (xQueueReceive(ws_queue, &ev, 0) == pdTRUE) free(ev.data);
+    ws_stopping = false;
 }
 
 // ---------------------------------------------------------------- wa core
@@ -464,7 +470,7 @@ extern "C" void app_main(void) {
     }
     if (!store.paired) keys_wipe();  // a new identity starts with no sessions or prekeys
 
-    ws_queue = xQueueCreate(32, sizeof(ws_event));
+    ws_queue = xQueueCreate(128, sizeof(ws_event));
     wa_callbacks cb = {ws_send, on_event, store_save, now_ms, unix_time, log_cb, NULL, {kv_get, kv_set, kv_del, NULL}};
     wa_client_init(&client, &store, &cb);
 

@@ -6,8 +6,9 @@ episode, running on an M5Stack Core2. The engine comes from
 ESP32 handhelds that ships PrBoom as one of its apps. This project replaces
 retro-go's system layer with one for the Core2. It compiles with ESP-IDF
 v5.4.4, plays in Espressif's QEMU emulator (see "Testing in QEMU") and
-boots on a Core2 with picture, sound and the demo loop working. Touch,
-vibration and the tilt thresholds still need more play-testing.
+has been played on a real Core2: picture, sound, tilt steering, touch to
+fire, the menus and the power-button mute all work. The tilt thresholds
+are untuned and the vibration patterns have had little testing.
 
 ## Layout
 
@@ -49,8 +50,13 @@ The code was written against v5.4.4. Connect the Core2 over USB-C, then:
 ```sh
 . $IDF_PATH/export.sh
 idf.py set-target esp32
-idf.py -p /dev/ttyACM0 build flash monitor   # use your serial port
+idf.py -p /dev/ttyACM0 -b 460800 build flash monitor   # use your serial port
 ```
+
+On a Mac the port is `/dev/cu.usbserial-*` (the Core2's CP2104/CH9102
+USB-serial chip). Flashing at the default 921600 baud can fail with serial
+noise on some cables; 460800 has been reliable. Flashing replaces whatever
+firmware the Core2 had, including M5Stack's factory demo.
 
 `idf.py flash` writes the app and a FAT image of the `wads/` directory. It
 does not touch the `saves` partition, so saved games and settings

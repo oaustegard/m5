@@ -58,6 +58,11 @@ USB-serial chip). Flashing at the default 921600 baud can fail with serial
 noise on some cables; 460800 has been reliable. Flashing replaces whatever
 firmware the Core2 had, including M5Stack's factory demo.
 
+The first flash takes a couple of minutes because it writes the 12 MB WAD
+partition; after that, `idf.py -p PORT -b 460800 app-flash` rewrites only
+the program. To keep the old firmware, back it up first with
+`esptool.py -p PORT read_flash 0 0x1000000 backup.bin`.
+
 `idf.py flash` writes the app and a FAT image of the `wads/` directory. It
 does not touch the `saves` partition, so saved games and settings
 (`prboom.cfg`) survive reflashing; `idf.py erase-flash` wipes them. On the
@@ -169,8 +174,9 @@ work; that is untested.
 
 ## Known gaps
 
-- Tilt thresholds in `doom_main.c` are untuned. Both axis signs were
-  flipped after the first test on the device.
+- Tilt thresholds in `doom_main.c` (`TILT_DEADZONE`, `TILT_FULL`) are
+  first guesses that played fine in one person's hands.
+- Holding a circle while firing (two touch points) is untested.
 - No strafe control.
 - No SD card support; WADs come from flash only.
 - Tilt plus three buttons cannot cover strafing or direct weapon selection.

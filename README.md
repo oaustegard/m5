@@ -9,7 +9,7 @@ Each project is self-contained in its own directory. Firmware is ESP-IDF; `pager
 
 | project | what it is | status |
 |---|---|---|
-| [`doom/`](doom/) | PrBoom with shareware DOOM1.WAD: tilt to move, touch to fire, vibration on shots, hits and damage | builds and plays in QEMU; not yet run on a Core2 |
+| [`doom/`](doom/) | PrBoom with shareware DOOM1.WAD: tilt to move, touch to fire, vibration on shots, hits and damage | plays on a Core2 |
 | [`whatsapp/`](whatsapp/) | A WhatsApp linked-device client ported from whatsmeow to C: QR pairing on screen | pairs with a phone and logs in from a host build; messages and firmware not started |
 | [`pager/`](pager/) | The Core2 as a pager for Muninn: a button press starts a Claude Code session, and session state and yes/no questions come back to the screen | Cloudflare Worker deployed and tested; firmware not started |
 

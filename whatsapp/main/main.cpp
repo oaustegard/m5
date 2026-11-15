@@ -309,7 +309,7 @@ static void reply_send(int choice) {
 static void on_sent(void) {
     sending = false;
     inbox_line &m = *inbox_push();
-    snprintf(m.who, sizeof m.who, "me to %s", sending_who);
+    snprintf(m.who, sizeof m.who, "me to %.33s", sending_who);  // who[40]: "me to " + 33
     snprintf(m.text, sizeof m.text, "%s", sending_text);
     snprintf(m.chat, sizeof m.chat, "%s", reply_chat);
     note[0] = 0;

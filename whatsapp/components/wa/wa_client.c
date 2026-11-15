@@ -354,7 +354,7 @@ static int handle_server_hello(wa_client *c, const uint8_t *frame, size_t len) {
     memcpy(c->rkey, keys + 32, 32);
     c->wctr = c->rctr = 0;
     c->state = WA_S_OPEN;
-    c->next_ping_ms = c->cb.now_ms(c->cb.ctx) + 25000;
+    c->next_ping_ms = c->cb.now_ms(c->cb.ctx) + 20000;
     wa_log(c, "noise handshake complete (%s)", c->store->paired ? "login" : "registration");
     return 0;
 }
@@ -421,8 +421,12 @@ static void handle_pair_device(wa_client *c, const wa_node *iq, const wa_node *p
     for (size_t i = 0; i < n && c->qr_count < 6; i++) {
         if (strcmp(refs[i].tag, "ref") != 0 || refs[i].content.type != WA_V_BYTES) continue;
         // "9" = PairClientOtherWebClient: DeviceProps UNKNOWN + UserAgent WEB.
-        snprintf(c->qr[c->qr_count], sizeof c->qr[0], "https://wa.me/settings/linked_devices#%.*s,%s,%s,%s,9",
-                 (int)refs[i].content.bytes.len, (const char *)refs[i].content.bytes.data, noise, ident, adv);
+        int w = snprintf(c->qr[c->qr_count], sizeof c->qr[0], "https://wa.me/settings/linked_devices#%.*s,%s,%s,%s,9",
+                         (int)refs[i].content.bytes.len, (const char *)refs[i].content.bytes.data, noise, ident, adv);
+        if (w < 0 || (size_t)w >= sizeof c->qr[0]) {
+            wa_log(c, "QR payload too long (%d bytes), skipping ref", w);
+            continue;
+        }
         c->qr_count++;
     }
     wa_log(c, "pair-device: %d QR refs", c->qr_count);
@@ -687,7 +691,9 @@ void wa_client_tick(wa_client *c) {
             emit(c, WA_EV_QR_EXHAUSTED, NULL, 0, NULL);
         }
     }
-    if (c->logged_in && now >= c->next_ping_ms) {
+    // whatsmeow starts its keepalive loop on connect, not on login; the server
+    // drops a silent connection after about 40 seconds, even while pairing.
+    if (now >= c->next_ping_ms) {
         wa_attr attrs[] = {{"id", wa_vstr(wa_client_next_id(c))},
                            {"xmlns", wa_vstr("w:p")},
                            {"type", wa_vstr("get")},

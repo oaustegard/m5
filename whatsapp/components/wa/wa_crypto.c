@@ -6,6 +6,7 @@
 
 #include <string.h>
 
+#include "mbedtls/aes.h"
 #include "mbedtls/bignum.h"
 #include "mbedtls/gcm.h"
 #include "mbedtls/md.h"
@@ -179,6 +180,45 @@ int wa_aes_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12], const uint8_
     int ret = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, 256);
     if (!ret) ret = mbedtls_gcm_auth_decrypt(&g, len - 16, iv, 12, aad, aadlen, in + len - 16, 16, in, out);
     mbedtls_gcm_free(&g);
+    return ret ? -1 : 0;
+}
+
+void wa_pbkdf2_sha256(const uint8_t *pw, size_t pwlen, const uint8_t *salt, size_t saltlen, uint32_t iterations,
+                      uint8_t *out, size_t outlen) {
+    mbedtls_md_context_t c;
+    mbedtls_md_init(&c);
+    mbedtls_md_setup(&c, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
+    mbedtls_md_hmac_starts(&c, pw, pwlen);
+    uint8_t u[32], t[32];
+    for (uint32_t block = 1, done = 0; done < outlen; block++) {
+        uint8_t be[4] = {block >> 24, block >> 16, block >> 8, block};
+        mbedtls_md_hmac_reset(&c);
+        mbedtls_md_hmac_update(&c, salt, saltlen);
+        mbedtls_md_hmac_update(&c, be, 4);
+        mbedtls_md_hmac_finish(&c, u);
+        memcpy(t, u, 32);
+        for (uint32_t i = 1; i < iterations; i++) {
+            mbedtls_md_hmac_reset(&c);
+            mbedtls_md_hmac_update(&c, u, 32);
+            mbedtls_md_hmac_finish(&c, u);
+            for (int k = 0; k < 32; k++) t[k] ^= u[k];
+        }
+        size_t take = outlen - done < 32 ? outlen - done : 32;
+        memcpy(out + done, t, take);
+        done += (uint32_t)take;
+    }
+    mbedtls_md_free(&c);
+}
+
+int wa_aes_ctr(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out) {
+    mbedtls_aes_context a;
+    uint8_t nonce[16], stream[16];
+    size_t off = 0;
+    memcpy(nonce, iv, 16);
+    mbedtls_aes_init(&a);
+    int ret = mbedtls_aes_setkey_enc(&a, key, 256);
+    if (!ret) ret = mbedtls_aes_crypt_ctr(&a, len, &off, nonce, stream, in, out);
+    mbedtls_aes_free(&a);
     return ret ? -1 : 0;
 }
 

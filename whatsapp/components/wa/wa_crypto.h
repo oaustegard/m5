@@ -44,6 +44,12 @@ int wa_aes_gcm_encrypt(const uint8_t key[32], const uint8_t iv[12], const uint8_
 int wa_aes_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12], const uint8_t *aad, size_t aadlen,
                        const uint8_t *in, size_t len, uint8_t *out);
 
+// PBKDF2-HMAC-SHA256.
+void wa_pbkdf2_sha256(const uint8_t *pw, size_t pwlen, const uint8_t *salt, size_t saltlen, uint32_t iterations,
+                      uint8_t *out, size_t outlen);
+// AES-256-CTR with a 16-byte initial counter block; in and out may alias.
+int wa_aes_ctr(const uint8_t key[32], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out);
+
 // Constant-time comparison; 1 if equal.
 int wa_ct_equal(const uint8_t *a, const uint8_t *b, size_t n);
 

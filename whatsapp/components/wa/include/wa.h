@@ -104,7 +104,7 @@ typedef struct {
     char id_prefix[16];
     uint32_t id_counter;
 
-    char qr[6][256];
+    char qr[6][512];  // a payload is ~275 chars: URL + ref + three base64 keys
     int qr_count, qr_index;
     uint64_t qr_deadline_ms;
     uint64_t next_ping_ms;

@@ -116,7 +116,7 @@ static void cb_event(void *ctx, const wa_event *ev) {
             break;
         case WA_EV_QR_EXHAUSTED:
             fprintf(stderr, "EVENT qr_exhausted\n");
-            emit_frame('Q', NULL, 0);
+            emit_frame('R', NULL, 0);
             break;
         case WA_EV_PAIRED:
             fprintf(stderr, "EVENT paired %s\n", ev->text);

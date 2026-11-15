@@ -76,6 +76,8 @@ async def run(args):
             origin="https://web.whatsapp.com",
             additional_headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
             max_size=1 << 24,
+            # WhatsApp does not answer WebSocket pings; the core sends its own keepalive IQs.
+            ping_interval=None,
             open_timeout=30,
         ) as ws:
             to_core(b"O")

@@ -127,6 +127,7 @@ static void draw_setup_text(bool imu_ok)
         {"B", "weapon"},
         {"C", "map"},
         {"", "hold: menu"},
+        {"Dead?", "tap to restart"},
     };
     int y = 68;
     for (const auto &l : lines)
@@ -135,7 +136,7 @@ static void draw_setup_text(bool imu_ok)
         d.drawString(l[0], 184, y);
         d.setTextColor(TFT_WHITE, TFT_BLACK);
         d.drawString(l[1], l[0][0] ? 232 : 196, y);
-        y += 19;
+        y += 18;
     }
 
     d.setTextColor(TFT_DARKGREY, TFT_BLACK);

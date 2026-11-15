@@ -96,6 +96,7 @@ screen. They are zones of the same touch panel that covers the screen.
 | | in game | in menus |
 |---|---|---|
 | while a demo plays | A, B or touching the screen opens the menu; C works as in game | — |
+| when you're dead | A, B or touching the screen restarts the level; C works as in game | — |
 | tilt (top edge away / toward you) | move forward / back | — |
 | tilt (right edge down / left edge down) | turn right / left | — |
 | touch the screen | fire, while held | left third: slider left · middle: select · right third: slider right |

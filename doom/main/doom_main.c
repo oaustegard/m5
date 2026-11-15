@@ -474,6 +474,7 @@ static void haptic_watch_player(void)
 // ---- Input ----------------------------------------------------------------
 //
 // In demos:  A, B or touch = menu; C as in game.
+// When dead: A, B or touch = restart (use); C as in game.
 // In game:   tilt = move/turn, touch screen = fire,
 //            A = use (hold 1.2 s: re-centre tilt), B = next weapon,
 //            C = automap (hold: menu).
@@ -560,7 +561,12 @@ void I_StartTic(void)
             {
                 // As on PC Doom, any press during a demo opens the menu
                 bool in_demo = !in_menu && (demoplayback || gamestate == GS_DEMOSCREEN);
-                held_key[b] = in_demo ? key_escape : key_for(b, in_menu, in.touch_x);
+                // Dead, B or touch restarts the level the way "use" (A) does
+                bool dead = !in_menu && !in_demo && gamestate == GS_LEVEL &&
+                            players[consoleplayer].playerstate == PST_DEAD;
+                held_key[b] = in_demo ? key_escape
+                            : dead    ? key_use
+                                      : key_for(b, in_menu, in.touch_x);
                 post_key(ev_keydown, held_key[b]);
             }
         }

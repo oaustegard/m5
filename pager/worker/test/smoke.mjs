@@ -45,7 +45,7 @@ rmSync(join(root, ".wrangler", "state"), { recursive: true, force: true });
 
 const dev = spawn("npx", ["wrangler", "dev", "--port", String(WORKER_PORT), "--ip", "127.0.0.1",
   "--var", `FIRE_URL:http://127.0.0.1:${MOCK_PORT}/fire`, "--var", "ROUTINE_ID:trig_test"],
-  { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" } });
+  { cwd: root, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" } });
 let devLog = "";
 dev.stdout.on("data", (d) => (devLog += d));
 dev.stderr.on("data", (d) => (devLog += d));
@@ -83,7 +83,12 @@ function openWs(key) {
     ws.onopen = () =>
       resolve({
         ws,
-        next: () => new Promise((r) => (queue.length ? r(queue.shift()) : waiters.push(r))),
+        next: () =>
+          new Promise((r, j) => {
+            if (queue.length) return r(queue.shift());
+            const t = setTimeout(() => j(new Error("timed out waiting for a ws message")), 5000);
+            waiters.push((m) => (clearTimeout(t), r(m)));
+          }),
         send: (o) => ws.send(JSON.stringify(o)),
         raw: (s) => ws.send(s),
       });
@@ -101,6 +106,9 @@ async function check(name, fn) {
 }
 
 try {
+  if (await fetch(BASE + "/health").then(() => true, () => false)) {
+    throw new Error(`port ${WORKER_PORT} is already serving; a previous run left wrangler behind`);
+  }
   await waitReady();
 
   await check("GET /health 200 without auth", async () => {
@@ -298,7 +306,8 @@ try {
 
   dev1?.ws.close();
 } finally {
-  dev.kill("SIGTERM");
+  // npx spawns wrangler, which spawns workerd: kill the whole process group.
+  try { process.kill(-dev.pid, "SIGTERM"); } catch {}
   mock.close();
   rmSync(join(root, ".dev.vars"), { force: true });
 }

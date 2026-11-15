@@ -65,7 +65,9 @@ virtual display. It does not emulate the Core2's screen controller, touch
 panel, IMU or speaker, so the QEMU variant swaps `m5_hal.cpp` for
 `qemu_hal.c` and everything else is the hardware code: boot, partitions,
 WAD loading, the engine, sound and music mixing, and the input mapping in
-`doom_main.c`. Install QEMU once, then run the harness from this directory:
+`doom_main.c`. The boot setup screen is the exception: the QEMU variant
+skips it and takes the flat pose as neutral. Install QEMU once, then run the
+harness from this directory:
 
 ```sh
 python $IDF_PATH/tools/idf_tools.py install qemu-xtensa
@@ -97,12 +99,18 @@ screen. They are zones of the same touch panel that covers the screen.
 | tilt (top edge away / toward you) | move forward / back | — |
 | tilt (right edge down / left edge down) | turn right / left | — |
 | touch the screen | fire, while held | left third: slider left · middle: select · right third: slider right |
-| A (left circle) | use / open doors; hold 1.2 s to re-centre tilt | up |
+| A (left circle) | use / open doors; hold 1.2 s to re-centre tilt (sets neutral to the current pose) | up |
 | B (middle circle) | switch weapon (PrBoom's toggle between your two preferred weapons) | select (also answers yes) |
 | C (right circle) | automap; hold 0.5 s for the menu | down; hold 0.5 s to go back (also answers no) |
 
-Tilt is measured from the pose the device is in when the game starts, so hold
-it the way you mean to play while it boots. Holding A to re-centre also
+At power-on a setup screen lists these controls and shows a tilt level: a
+dot for the current tilt, an inner ring where tilt starts to count (the dead
+zone) and an outer ring for full speed. The dot moves the way the game will:
+right for a right turn, up for forward. Hold the Core2 the way you mean to
+play and tap the screen; that pose becomes neutral and the game loads. The
+game reads the two axes separately, so the rings are exact along the
+crosshairs and approximate between them. Without a working motion sensor
+the screen says so and a tap just continues. Holding A to re-centre also
 presses "use" once, which is harmless away from doors. The touch controller
 (an FT6336U) tracks two touch points, so firing while pressing a circle should
 work; that is untested.
@@ -145,9 +153,8 @@ work; that is untested.
 
 ## Known gaps
 
-- Tilt thresholds in `doom_main.c` are untuned. `TILT_TURN_SIGN` was
-  flipped after the first test on the device; `TILT_MOVE_SIGN` has not been
-  checked yet.
+- Tilt thresholds in `doom_main.c` are untuned. Both axis signs were
+  flipped after the first test on the device.
 - No strafe control.
 - No SD card support; WADs come from flash only.
 - Tilt plus three buttons cannot cover strafing or direct weapon selection.

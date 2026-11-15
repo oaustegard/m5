@@ -3,6 +3,8 @@
 
 #include <M5Unified.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
+#include <math.h>
 #include <stdio.h>
 
 // The frame goes out in horizontal bands through two DMA buffers: one is
@@ -94,6 +96,140 @@ extern "C" void hal_input_read(hal_input_t *in)
         M5.Imu.update();
         in->imu_ok = M5.Imu.getAccel(&in->ax, &in->ay, &in->az);
     }
+}
+
+// ---- Boot setup screen ----------------------------------------------------
+
+#define LEVEL_SIZE   164                // sprite side, px
+#define LEVEL_R      (LEVEL_SIZE / 2 - 2)
+#define LEVEL_X      8                  // sprite position on screen
+#define LEVEL_Y      58
+#define LEVEL_FULL_R 68                 // radius of the full-speed ring, px
+#define DOT_R        6
+
+static void draw_setup_text(bool imu_ok)
+{
+    auto &d = M5.Display;
+    d.fillScreen(TFT_BLACK);
+    d.setTextDatum(top_left);
+    d.setFont(&fonts::Font2);
+    d.setTextSize(1);
+
+    d.setTextColor(TFT_YELLOW, TFT_BLACK);
+    d.drawString("Hold the Core2 the way you want to play,", 6, 6);
+    d.drawString("then tap the screen", 6, 24);
+
+    static const char *const lines[][2] = {
+        {"Tilt", "move / turn"},
+        {"Touch", "fire"},
+        {"A", "use"},
+        {"", "hold: re-centre"},
+        {"B", "weapon"},
+        {"C", "map"},
+        {"", "hold: menu"},
+    };
+    int y = 68;
+    for (const auto &l : lines)
+    {
+        d.setTextColor(TFT_ORANGE, TFT_BLACK);
+        d.drawString(l[0], 184, y);
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+        d.drawString(l[1], l[0][0] ? 232 : 196, y);
+        y += 19;
+    }
+
+    d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    d.drawString(imu_ok ? "dot = tilt, rings = dead zone / full speed"
+                        : "no motion sensor: tilt is off",
+                 6, 222);
+}
+
+extern "C" bool hal_setup_screen(const hal_setup_t *cfg, float *neutral_x, float *neutral_y)
+{
+    hal_input_t in;
+    hal_input_read(&in);
+    bool imu_ok = in.imu_ok;
+    draw_setup_text(imu_ok);
+
+    M5Canvas level(&M5.Display);
+    level.setPsram(false);
+    bool have_sprite = level.createSprite(LEVEL_SIZE, LEVEL_SIZE) != nullptr;
+
+    const float scale = LEVEL_FULL_R / cfg->full;          // px per g
+    const int dead_r = (int)(cfg->deadzone * scale + 0.5f);
+    const int c = LEVEL_SIZE / 2;
+
+    // Until the tap, the dot is drawn against the pose at power-on, so it
+    // shows how the controls would read if that were the neutral pose.
+    float ref_x = in.ax, ref_y = in.ay;
+    float fx = in.ax, fy = in.ay;
+    bool was_touching = in.touching;     // ignore a finger already down at boot
+    bool captured = false;
+
+    for (;;)
+    {
+        int64_t frame_start = esp_timer_get_time();
+        hal_input_read(&in);
+
+        if (in.imu_ok)
+        {
+            fx += 0.35f * (in.ax - fx);
+            fy += 0.35f * (in.ay - fy);
+        }
+
+        if (in.touching && !was_touching)
+        {
+            *neutral_x = fx;
+            *neutral_y = fy;
+            ref_x = fx;
+            ref_y = fy;
+            captured = in.imu_ok;
+        }
+        if (!in.touching && was_touching && (captured || !imu_ok))
+            break;
+        was_touching = in.touching;
+
+        if (have_sprite)
+        {
+            float dx = cfg->dot_x_per_ax * (fx - ref_x);
+            float dy = cfg->dot_y_per_ay * (fy - ref_y);
+            float mx = fabsf(dx), my = fabsf(dy);
+            float m = mx > my ? mx : my;   // the game reads each axis separately
+            uint16_t dot = m < cfg->deadzone ? TFT_DARKGREY
+                         : m < cfg->full     ? TFT_YELLOW
+                                             : TFT_RED;
+            int px = (int)(dx * scale), py = (int)(dy * scale);
+            int lim = LEVEL_R - DOT_R;
+            float len = sqrtf((float)(px * px + py * py));
+            if (len > lim)
+            {
+                px = (int)(px * lim / len);
+                py = (int)(py * lim / len);
+            }
+
+            level.fillSprite(TFT_BLACK);
+            level.drawCircle(c, c, LEVEL_R, TFT_DARKGREY);
+            level.drawCircle(c, c, LEVEL_FULL_R, TFT_WHITE);
+            level.drawCircle(c, c, dead_r, TFT_DARKGREY);
+            level.drawFastHLine(c - LEVEL_R, c, 2 * LEVEL_R, 0x2104);
+            level.drawFastVLine(c, c - LEVEL_R, 2 * LEVEL_R, 0x2104);
+            if (in.touching)
+                level.drawCircle(c, c, dead_r + 3, TFT_GREEN);
+            if (imu_ok)
+                level.fillCircle(c + px, c + py, DOT_R, dot);
+            level.pushSprite(LEVEL_X, LEVEL_Y);
+        }
+
+        int64_t spent_ms = (esp_timer_get_time() - frame_start) / 1000;
+        if (spent_ms < 33)
+            vTaskDelay(pdMS_TO_TICKS(33 - spent_ms));
+    }
+
+    if (have_sprite)
+        level.deleteSprite();
+    printf("m5: setup done, neutral %s %.3f,%.3f\n", captured ? "set" : "unset",
+           captured ? *neutral_x : 0.0f, captured ? *neutral_y : 0.0f);
+    return captured;
 }
 
 extern "C" void hal_vibrate(uint8_t level)

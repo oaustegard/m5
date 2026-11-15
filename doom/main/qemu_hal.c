@@ -203,6 +203,16 @@ void hal_display_text(const char *msg)
     ESP_LOGI(TAG, "screen text: %s", msg);
 }
 
+bool hal_setup_screen(const hal_setup_t *cfg, float *neutral_x, float *neutral_y)
+{
+    // No setup screen in the emulator: take the scripted flat pose and go.
+    (void)cfg;
+    *neutral_x = 0.0f;
+    *neutral_y = 0.0f;
+    ESP_LOGI(TAG, "setup screen skipped, neutral pose 0,0");
+    return true;
+}
+
 void hal_input_read(hal_input_t *in)
 {
     memset(in, 0, sizeof(*in));

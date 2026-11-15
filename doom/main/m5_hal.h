@@ -34,6 +34,20 @@ void hal_display_text(const char *msg);
 
 void hal_input_read(hal_input_t *in);
 
+// Boot setup screen: a controls summary and a live tilt level. The level
+// draws rings at `deadzone` and `full` g from the neutral pose and a dot at
+// the current tilt; screen x moves by dot_x_per_ax * (ax - neutral) and
+// screen y (downward) by dot_y_per_ay * (ay - neutral), so the caller picks
+// signs that match the game's controls. Returns when the screen is tapped
+// and released; on true, *neutral_x/*neutral_y hold the accelerometer x/y
+// at the tap. Returns false if the IMU is unavailable.
+typedef struct {
+    float deadzone, full;        // g
+    float dot_x_per_ax;          // +1 or -1
+    float dot_y_per_ay;          // +1 or -1
+} hal_setup_t;
+bool hal_setup_screen(const hal_setup_t *cfg, float *neutral_x, float *neutral_y);
+
 // Vibration motor strength, 0 = off. Applies immediately; timing is the
 // caller's job.
 void hal_vibrate(uint8_t level);

@@ -58,13 +58,13 @@
 #define MUSIC_FRAMES (AUDIO_SAMPLE_RATE / TICRATE + 1)
 
 // ---- Tilt tuning ----------------------------------------------------------
-// Deltas are in g from the neutral pose captured at boot (or on a long press
-// of button A). Signs depend on how the IMU sits on the board; flip these if
+// Deltas are in g from the neutral pose captured on the boot setup screen
+// (or on a long press of button A). Signs depend on how the IMU sits on the board; flip these if
 // tilting goes the wrong way.
 #define TILT_DEADZONE   0.08f
 #define TILT_FULL       0.35f
 #define TILT_TURN_SIGN  (+1)   // applied to the x-axis delta
-#define TILT_MOVE_SIGN  (+1)   // applied to the y-axis delta
+#define TILT_MOVE_SIGN  (-1)   // applied to the y-axis delta
 #define TILT_MAX_TURN   1280   // angleturn units per tic (fast turn)
 #define TILT_MAX_MOVE   50     // forwardmove units per tic (run speed)
 
@@ -651,6 +651,18 @@ static void mount_filesystems(void)
 void app_main(void)
 {
     hal_init();
+
+    // Positive analog_turn turns left and positive analog_forward moves
+    // forward, so the dot goes right for a right turn and up for forward.
+    const hal_setup_t setup = {
+        .deadzone = TILT_DEADZONE,
+        .full = TILT_FULL,
+        .dot_x_per_ax = -TILT_TURN_SIGN,
+        .dot_y_per_ay = -TILT_MOVE_SIGN,
+    };
+    if (hal_setup_screen(&setup, &neutral_x, &neutral_y))
+        neutral_set = true;
+
     hal_display_text("Loading DOOM...");
 
     mount_filesystems();

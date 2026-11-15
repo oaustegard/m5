@@ -63,7 +63,7 @@
 // tilting goes the wrong way.
 #define TILT_DEADZONE   0.08f
 #define TILT_FULL       0.35f
-#define TILT_TURN_SIGN  (-1)   // applied to the x-axis delta
+#define TILT_TURN_SIGN  (+1)   // applied to the x-axis delta
 #define TILT_MOVE_SIGN  (+1)   // applied to the y-axis delta
 #define TILT_MAX_TURN   1280   // angleturn units per tic (fast turn)
 #define TILT_MAX_MOVE   50     // forwardmove units per tic (run speed)
@@ -473,6 +473,7 @@ static void haptic_watch_player(void)
 
 // ---- Input ----------------------------------------------------------------
 //
+// In demos:  A, B or touch = menu; C as in game.
 // In game:   tilt = move/turn, touch screen = fire,
 //            A = use (hold 1.2 s: re-centre tilt), B = next weapon,
 //            C = automap (hold: menu).
@@ -557,7 +558,9 @@ void I_StartTic(void)
             // C waits to tell a tap from a hold; everything else acts at once
             if (b != BTN_C)
             {
-                held_key[b] = key_for(b, in_menu, in.touch_x);
+                // As on PC Doom, any press during a demo opens the menu
+                bool in_demo = !in_menu && (demoplayback || gamestate == GS_DEMOSCREEN);
+                held_key[b] = in_demo ? key_escape : key_for(b, in_menu, in.touch_x);
                 post_key(ev_keydown, held_key[b]);
             }
         }

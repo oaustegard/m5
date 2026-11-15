@@ -5,9 +5,9 @@ episode, running on an M5Stack Core2. The engine comes from
 [retro-go](https://github.com/ducalex/retro-go), an emulator firmware for
 ESP32 handhelds that ships PrBoom as one of its apps. This project replaces
 retro-go's system layer with one for the Core2. It compiles with ESP-IDF
-v5.4.4 and plays in Espressif's QEMU emulator (see "Testing in QEMU").
-**It has not run on a Core2 yet**, so the M5Unified display, touch, motion
-and speaker code is untested and the tilt settings are guesses.
+v5.4.4, plays in Espressif's QEMU emulator (see "Testing in QEMU") and
+boots on a Core2 with picture, sound and the demo loop working. Touch,
+vibration and the tilt thresholds still need more play-testing.
 
 ## Layout
 
@@ -93,6 +93,7 @@ screen. They are zones of the same touch panel that covers the screen.
 
 | | in game | in menus |
 |---|---|---|
+| while a demo plays | A, B or touching the screen opens the menu; C works as in game | — |
 | tilt (top edge away / toward you) | move forward / back | — |
 | tilt (right edge down / left edge down) | turn right / left | — |
 | touch the screen | fire, while held | left third: slider left · middle: select · right third: slider right |
@@ -144,8 +145,9 @@ work; that is untested.
 
 ## Known gaps
 
-- Tilt axis signs (`TILT_TURN_SIGN`, `TILT_MOVE_SIGN`) and thresholds in
-  `doom_main.c` are guesses until someone holds the device.
+- Tilt thresholds in `doom_main.c` are untuned. `TILT_TURN_SIGN` was
+  flipped after the first test on the device; `TILT_MOVE_SIGN` has not been
+  checked yet.
 - No strafe control.
 - No SD card support; WADs come from flash only.
 - Tilt plus three buttons cannot cover strafing or direct weapon selection.

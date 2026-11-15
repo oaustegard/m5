@@ -188,7 +188,7 @@ static void put_device_props(wa_buf *b) {
     static const uint32_t ver[3] = {0, 1, 0};
     wa_pb_str(b, 1, "Muninn Core2");
     put_app_version(b, 2, ver);
-    wa_pb_varint(b, 3, 0);  // PlatformType UNKNOWN
+    wa_pb_varint(b, 3, 7);  // PlatformType DESKTOP: the phone lists "Muninn Core2" with a computer icon
     wa_pb_varint(b, 4, 0);  // requireFullSync false
     wa_buf h = {0};
     wa_pb_varint(&h, 3, 10240);  // storageQuotaMb

@@ -456,6 +456,19 @@ static void send_message_receipt(wa_client *c, const wa_node *n, const msg_sourc
     wa_client_send_node(c, &receipt);
 }
 
+// receipt.go sendProtocolMessageReceipt: the phone waits for a "hist_sync"
+// receipt for each history sync notification before it finishes linking (its
+// "Logging in" spinner) and sends the next chunk. We don't download the
+// history itself, only acknowledge it.
+static void send_hist_sync_receipt(wa_client *c, const wa_node *n) {
+    const char *id = wa_attr_str(n, "id");
+    if (!id || !c->store->user[0]) return;
+    wa_jid to = {.user = c->store->user, .server = "c.us"};
+    wa_attr attrs[] = {{"id", wa_vstr(id)}, {"type", wa_vstr("hist_sync")}, {"to", wa_vjid(to)}};
+    wa_node receipt = {"receipt", attrs, 3, {0}};
+    wa_client_send_node(c, &receipt);
+}
+
 static void fill_msg(wa_message *m, const wa_node *n, const msg_source *src) {
     memset(m, 0, sizeof *m);
     m->id = wa_attr_str(n, "id");
@@ -490,6 +503,14 @@ static bool handle_plaintext(wa_client *c, const wa_node *n, const msg_source *s
             int src_rc = wa_sig_group_process(&s, src->chat, src->enc_addr, axo, axol);
             wa__log(c, "sender key from %s in %s: %s", src->enc_addr, src->chat, wa_sig_strerror(src_rc));
         }
+    }
+
+    // protocolMessage (12) carrying a historySyncNotification (6) from our phone.
+    const uint8_t *proto, *hsn;
+    size_t protol, hsnl;
+    if (src->from_me && wa_pb_get_bytes(pt, len, 12, &proto, &protol) && wa_pb_get_bytes(proto, protol, 6, &hsn, &hsnl)) {
+        wa__log(c, "history sync notification %s, acknowledging", wa_attr_str(n, "id"));
+        send_hist_sync_receipt(c, n);
     }
 
     const char *kind = NULL;

@@ -508,6 +508,45 @@ static void test_signal_interop(void) {
         CHECK(0, "peer group encrypt");
     }
     for (int i = 0; i < 3; i++) free(g[i]);
+
+    // Our own sender key: the peer stores it from our distribution message
+    // and decrypts what we send, in order and after a gap.
+    {
+        static const char G[] = "120363000000000001@g.us", ME[] = "77700009999:7@lid";
+        uint8_t *d1 = NULL, *d2 = NULL, *m[3] = {0};
+        size_t d1l, d2l, ml[3];
+        CHECK(wa_sig_group_skdm(&s, G, ME, &d1, &d1l) == WA_SIG_OK && wa_sig_group_skdm(&s, G, ME, &d2, &d2l) == WA_SIG_OK &&
+                  d1l == d2l && memcmp(d1, d2, d1l) == 0,
+              "our sender key is made once and kept");
+        char h[512];
+        if (d1) {
+            hexs(d1, d1l, h);
+            CHECK(strcmp(peer_cmd(&p, "gproc %s me %s", G, h), "ok") == 0, "the peer takes our distribution message");
+        }
+        const char *mt[3] = {"to the group", "second", "third, after a gap"};
+        for (int i = 0; i < 3; i++)
+            CHECK(wa_sig_group_encrypt(&s, G, ME, (const uint8_t *)mt[i], strlen(mt[i]), &m[i], &ml[i]) == WA_SIG_OK,
+                  "group encrypt");
+        int order[2] = {0, 2};
+        for (int k = 0; k < 2; k++) {
+            int i = order[k];
+            if (!m[i]) continue;
+            hexs(m[i], ml[i], h);
+            size_t pl;
+            uint8_t *pt = reply_bytes(peer_cmd(&p, "gdec %s me %s", G, h), "pt", &pl);
+            CHECK(pt && pl == strlen(mt[i]) && memcmp(pt, mt[i], pl) == 0,
+                  k ? "the peer decrypts a later message after a skipped one" : "the peer decrypts our group message");
+            free(pt);
+        }
+        free(d2);
+        uint8_t *d3 = NULL;
+        size_t d3l;
+        CHECK(wa_sig_group_skdm(&s, G, ME, &d3, &d3l) == WA_SIG_OK && d1 && d3l == d1l && memcmp(d3, d1, d1l) != 0,
+              "a distribution message after sending carries the advanced iteration");
+        free(d1);
+        free(d3);
+        for (int i = 0; i < 3; i++) free(m[i]);
+    }
 out:
     kv_clear(&kv);
     peer_stop(&p);
@@ -979,7 +1018,7 @@ static void test_client_send(void) {
     wa_sig_prekeys_generate(&s0, 1, &opk0);
 
     CHECK(wa_client_send_text(&c, "15550001111:2@s.whatsapp.net", "x") == NULL, "a device JID is refused");
-    CHECK(wa_client_send_text(&c, "123@g.us", "x") == NULL, "groups are not supported yet");
+    CHECK(wa_client_send_text(&c, "123@broadcast", "x") == NULL, "a broadcast list is refused");
     const char *id = wa_client_send_text(&c, "15550001111@s.whatsapp.net", "hello from the Core2");
     CHECK(id && strlen(id) == 22 && strncmp(id, "3EB0", 4) == 0, "send starts with a whatsmeow-style id");
     char msg_id[32];
@@ -1101,6 +1140,80 @@ static void test_client_send(void) {
     probe_time += 25000;
     wa_client_tick(&c);
     CHECK(pr.sends_failed == 2 && strstr(pr.send_error, "timed out"), "a send times out");
+
+    // A group: members first, then devices, then one skmsg plus the sender
+    // key distribution message to every device (the sessions exist by now).
+    static const char G[] = "120363000000000001@g.us";
+    before = pr.nsent;
+    id = wa_client_send_text(&c, G, "hello group");
+    CHECK(id && pr.nsent == before + 1 && strstr(pr.sent[before], "xmlns=\"w:g2\"") &&
+              strstr(pr.sent[before], "to=\"120363000000000001@g.us\"") && strstr(pr.sent[before], "request=\"interactive\""),
+          "a group send asks for the members");
+    snprintf(msg_id, sizeof msg_id, "%s", id ? id : "");
+    wa_jid them_pn = {.user = "15550001111", .server = "s.whatsapp.net"};
+    wa_attr p1[] = {{"jid", wa_vjid(lid)}, {"phone_number", wa_vjid(them_pn)}, {"type", wa_vstr("admin")}};
+    wa_attr p2[] = {{"jid", wa_vjid(own)}};
+    wa_node parts[] = {{"participant", p1, 3, {0}}, {"participant", p2, 1, {0}}};
+    wa_attr gattrs[] = {{"id", wa_vstr("120363000000000001")}, {"addressing_mode", wa_vstr("lid")}};
+    wa_node grp = {"group", gattrs, 2, wa_vlist(parts, 2)};
+    feed_iq_result(&c, c.out.iq_id, &grp, 1);
+    CHECK(c.out.nmembers == 2 && pr.nsent == before + 2 && strstr(pr.sent[before + 1], "88800001111@lid") &&
+              strstr(pr.sent[before + 1], "77700009999@lid"),
+          "then the members' device lists");
+    feed_usync(&c, c.out.iq_id, users, 2);
+    CHECK(pr.nsent == before + 3 && strstr(pr.sent[before + 2], "<message") &&
+              strstr(pr.sent[before + 2], "to=\"120363000000000001@g.us\"") &&
+              strstr(pr.sent[before + 2], "addressing_mode=\"lid\"") && strstr(pr.sent[before + 2], "phash=\"2:") &&
+              strstr(pr.sent[before + 2], "type=\"skmsg\""),
+          "the group message: participants, an skmsg, LID addressing and a participant hash");
+    if (pr.nsent >= before + 3) printf("%.400s...\n", pr.sent[before + 2]);
+    {
+        // Their phone: the distribution message, then the skmsg.
+        rc = open_enc(&pr, &s0, "88800001111", 0, &pt, &ptl, type);
+        const uint8_t *skd = NULL, *gid = NULL, *ax = NULL;
+        size_t skl = 0, gl = 0, axl = 0;
+        CHECK(rc == 0 && wa_pb_get_bytes(pt, ptl, 2, &skd, &skl) && wa_pb_get_bytes(skd, skl, 1, &gid, &gl) &&
+                  gl == strlen(G) && memcmp(gid, G, gl) == 0 && wa_pb_get_bytes(skd, skl, 2, &ax, &axl),
+              "every device gets a SenderKeyDistributionMessage for the group");
+        int prc = ax ? wa_sig_group_process(&s0, G, "77700009999:7@lid", ax, axl) : -1;
+        if (rc == 0) free(pt);
+        wa_arena ga = {0};
+        wa_node *m = wa_node_decode(&ga, pr.raw, pr.raw_len);
+        const wa_node *kids;
+        size_t nk = m ? wa_children(m, &kids) : 0;
+        const wa_node *sk = NULL;
+        for (size_t i = 0; i < nk; i++) {
+            const char *t2 = wa_attr_str(&kids[i], "type");
+            if (strcmp(kids[i].tag, "enc") == 0 && t2 && strcmp(t2, "skmsg") == 0) sk = &kids[i];
+        }
+        uint8_t *gpt = NULL;
+        size_t gptl = 0;
+        int drc = sk && prc == 0 ? wa_sig_group_decrypt(&s0, G, "77700009999:7@lid", sk->content.bytes.data,
+                                                         sk->content.bytes.len, &gpt, &gptl)
+                                 : -1;
+        long ul = drc == 0 ? wa_unpad(gpt, gptl) : -1;
+        const uint8_t *conv = NULL;
+        size_t cl = 0;
+        CHECK(drc == 0 && ul > 0 && wa_pb_get_bytes(gpt, (size_t)ul, 1, &conv, &cl) && cl == 11 &&
+                  memcmp(conv, "hello group", 11) == 0,
+              "their phone decrypts the group message with our sender key");
+        free(gpt);
+        wa_arena_free(&ga);
+        rc = open_enc(&pr, &sm, "77700009999", 0, &pt, &ptl, type);
+        CHECK(rc == 0 && wa_pb_get_bytes(pt, ptl, 2, &skd, &skl), "our own phone gets the sender key too");
+        if (rc == 0) free(pt);
+    }
+    aattrs[1].val = wa_vstr(msg_id);
+    feed_node(&c, &ack);
+    CHECK(pr.sends_ok == 2 && c.out.stage == 0, "the ack completes the group send");
+
+    before = pr.nsent;
+    id = wa_client_send_text(&c, G, "x");
+    wa_attr gattrs_pn[] = {{"id", wa_vstr("120363000000000001")}, {"addressing_mode", wa_vstr("pn")}};
+    wa_node grp_pn = {"group", gattrs_pn, 2, wa_vlist(parts, 2)};
+    feed_iq_result(&c, c.out.iq_id, &grp_pn, 1);
+    CHECK(id && pr.sends_failed == 3 && strstr(pr.send_error, "phone-number addressing") && c.out.stage == 0,
+          "a phone-number addressed group is refused");
 
     wa_client_free(&c);
     free(pr.raw);

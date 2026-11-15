@@ -122,7 +122,8 @@ typedef struct {
 
 typedef enum { WA_S_IDLE, WA_S_HELLO_SENT, WA_S_OPEN, WA_S_CLOSED } wa_state;
 
-#define WA_SEND_MAX_DEVICES 16  // the recipient's devices plus our own others
+#define WA_SEND_MAX_DEVICES 24  // the recipients' devices plus our own others
+#define WA_GROUP_MAX_MEMBERS 8  // groups we send to are small: the bot's own
 #define WA_LID_CACHE 8
 
 typedef struct {
@@ -170,6 +171,9 @@ typedef struct {
         char iq_id[24];   // the request we are waiting on
         char to_lid[32];  // the recipient's LID user
         char pn[32];      // their phone number, when the app gave one
+        char group[48];   // "<id>@g.us" when sending to a group
+        uint8_t nmembers;
+        char members[WA_GROUP_MAX_MEMBERS][32];  // the group's LID users, ourselves included
         char *text;
         uint64_t deadline_ms;
         uint8_t ndev;
@@ -197,9 +201,11 @@ int wa_client_send_node(wa_client *c, const wa_node *n);
 // A fresh request id ("<prefix><counter>"), valid until the next call.
 const char *wa_client_next_id(wa_client *c);
 
-// Send a text message to a person: to is "<number>@s.whatsapp.net" or
-// "<lid>@lid", as wa_message.chat gives it. Our own number works too ("note to
-// self"). Returns the new message's id (valid until the next send), or NULL
-// if the client is not logged in, another send is still running, or to is not
-// a user JID. The outcome arrives as WA_EV_SENT or WA_EV_SEND_FAILED.
+// Send a text message: to is "<number>@s.whatsapp.net" or "<lid>@lid" for a
+// person, or "<id>@g.us" for a group, as wa_message.chat gives it. Our own
+// number works too ("note to self"). Groups must use LID addressing (new
+// groups do) and have at most WA_GROUP_MAX_MEMBERS members. Returns the new
+// message's id (valid until the next send), or NULL if the client is not
+// logged in, another send is still running, or to is not a user or group JID.
+// The outcome arrives as WA_EV_SENT or WA_EV_SEND_FAILED.
 const char *wa_client_send_text(wa_client *c, const char *to, const char *text);

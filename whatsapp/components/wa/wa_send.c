@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
-// Sending 1:1 text messages. Ported from whatsmeow
+// Sending text messages to people and groups. Ported from whatsmeow
 // (https://github.com/tulir/whatsmeow): send.go SendMessage, sendDM,
-// prepareMessageNode, marshalMessage and encryptMessageForDevices; user.go
-// usync, GetUserInfo and GetUserDevices; prekeys.go fetchPreKeys and
+// sendGroup, prepareMessageNode, marshalMessage, participantListHashV2 and
+// encryptMessageForDevices; group.go getGroupInfo and parseParticipant;
+// user.go usync, GetUserInfo and GetUserDevices; prekeys.go fetchPreKeys and
 // nodeToPreKeyBundle. Copyright (c) 2021-2026 Tulir Asokan; C port for the Core2.
 //
 // whatsmeow blocks on each request; this core is event driven, so a send is a
@@ -10,12 +11,17 @@
 // <ack>. One send runs at a time:
 //
 //   phone number -> LID   usync (only when the LID is not cached)
-//   device lists          usync for the recipient and ourselves
+//   group members         <iq xmlns=w:g2 type=get> (groups only)
+//   device lists          usync for the recipient (or the members) and ourselves
 //   prekey bundles        <iq xmlns=encrypt type=get> for devices without a session
 //   <message>             one <enc> per device; then wait for the server's <ack>
 //
 // Like current whatsmeow, a message to a phone number is addressed to the
 // recipient's LID, with peer_recipient_pn naming the number.
+//
+// A group message is encrypted once with our sender key (<enc type=skmsg>);
+// every member device, our own included, gets the sender key distribution
+// message through its 1:1 session. Like whatsmeow, every send carries it.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,7 +31,7 @@
 #include "wa_pb.h"
 #include "wa_signal.h"
 
-enum { OUT_IDLE, OUT_LID, OUT_DEVICES, OUT_PREKEYS, OUT_ACK };
+enum { OUT_IDLE, OUT_LID, OUT_GROUP, OUT_DEVICES, OUT_PREKEYS, OUT_ACK };
 
 #define STAGE_TIMEOUT_MS 20000
 
@@ -125,16 +131,49 @@ static void query_lid(wa_client *c) {
     if (send_usync(c, "full", "background", query, 5, &user, 1)) out_fail(c, "could not send the LID query");
 }
 
-// GetUserDevices for the recipient and our own account.
+// GetUserDevices for the recipient (or the group's members) and our own account.
 static void query_devices(wa_client *c) {
     wa_attr dattrs[] = {{"version", wa_vstr("2")}};
     wa_node query = {"devices", dattrs, 1, {0}};
-    wa_attr uattrs[2][1] = {{{"jid", wa_vjid(lid_jid(c->out.to_lid, 0))}},
-                            {{"jid", wa_vjid(lid_jid(c->store->lid_user, 0))}}};
-    wa_node users[] = {{"user", uattrs[0], 1, {0}}, {"user", uattrs[1], 1, {0}}};
-    bool self = strcmp(c->out.to_lid, c->store->lid_user) == 0;
+    wa_attr uattrs[WA_GROUP_MAX_MEMBERS + 1][1];
+    wa_node users[WA_GROUP_MAX_MEMBERS + 1];
+    size_t n = 0;
+    if (c->out.group[0]) {
+        for (int i = 0; i < c->out.nmembers; i++) {
+            uattrs[n][0] = (wa_attr){"jid", wa_vjid(lid_jid(c->out.members[i], 0))};
+            users[n] = (wa_node){"user", uattrs[n], 1, {0}};
+            n++;
+        }
+    } else {
+        uattrs[n][0] = (wa_attr){"jid", wa_vjid(lid_jid(c->out.to_lid, 0))};
+        users[n] = (wa_node){"user", uattrs[n], 1, {0}};
+        n++;
+        if (strcmp(c->out.to_lid, c->store->lid_user) != 0) {
+            uattrs[n][0] = (wa_attr){"jid", wa_vjid(lid_jid(c->store->lid_user, 0))};
+            users[n] = (wa_node){"user", uattrs[n], 1, {0}};
+            n++;
+        }
+    }
     stage(c, OUT_DEVICES);
-    if (send_usync(c, "query", "message", &query, 1, users, self ? 1 : 2)) out_fail(c, "could not send the device query");
+    if (send_usync(c, "query", "message", &query, 1, users, n)) out_fail(c, "could not send the device query");
+}
+
+// group.go getGroupInfo: <iq xmlns=w:g2 type=get to=<group>><query request=interactive/></iq>
+static void query_group(wa_client *c) {
+    snprintf(c->out.iq_id, sizeof c->out.iq_id, "%s", wa_client_next_id(c));
+    const char *at = strchr(c->out.group, '@');
+    char user[48];
+    snprintf(user, sizeof user, "%.*s", (int)(at - c->out.group), c->out.group);
+    wa_jid g = {.user = user, .server = "g.us"};
+    wa_attr qattrs[] = {{"request", wa_vstr("interactive")}};
+    wa_node query = {"query", qattrs, 1, {0}};
+    wa_attr attrs[] = {{"id", wa_vstr(c->out.iq_id)},
+                       {"xmlns", wa_vstr("w:g2")},
+                       {"type", wa_vstr("get")},
+                       {"to", wa_vjid(g)}};
+    wa_node iq = {"iq", attrs, 4, wa_vlist(&query, 1)};
+    stage(c, OUT_GROUP);
+    if (wa_client_send_node(c, &iq)) out_fail(c, "could not send the group query");
 }
 
 static const char *dev_addr(wa_client *c, int i, char *buf, size_t n) {
@@ -195,6 +234,32 @@ static void on_lid(wa_client *c, const wa_node *iq) {
         }
     }
     out_fail(c, "not on WhatsApp (no LID)");
+}
+
+// group.go parseGroupNode and parseParticipant: the members' LIDs.
+static void on_group(wa_client *c, const wa_node *iq) {
+    const wa_node *g = wa_child(iq, "group"), *kids;
+    if (!g) return out_fail(c, "no group in the answer");
+    const char *mode = wa_attr_str(g, "addressing_mode");
+    if (!mode || strcmp(mode, "lid") != 0) return out_fail(c, "group uses phone-number addressing (unsupported)");
+    size_t nk = wa_children(g, &kids);
+    c->out.nmembers = 0;
+    bool self = false;
+    for (size_t i = 0; i < nk; i++) {
+        const wa_jid *jid = wa_attr_jid(&kids[i], "jid");
+        if (strcmp(kids[i].tag, "participant") || !jid || strcmp(jid->server, "lid") ||
+            strlen(jid->user) >= sizeof c->out.members[0])
+            continue;
+        if (c->out.nmembers == WA_GROUP_MAX_MEMBERS) return out_fail(c, "group has too many members");
+        snprintf(c->out.members[c->out.nmembers++], sizeof c->out.members[0], "%s", jid->user);
+        self |= strcmp(jid->user, c->store->lid_user) == 0;
+    }
+    if (!self) {
+        if (c->out.nmembers == WA_GROUP_MAX_MEMBERS) return out_fail(c, "group has too many members");
+        snprintf(c->out.members[c->out.nmembers++], sizeof c->out.members[0], "%s", c->store->lid_user);
+    }
+    wa__log(c, "send %s: group has %d member(s)", c->out.id, c->out.nmembers);
+    query_devices(c);
 }
 
 // user.go parseDeviceList, keeping everything but ourselves and hosted devices.
@@ -304,12 +369,14 @@ bool wa__send_handle_iq(wa_client *c, const wa_node *n) {
         const char *code = err ? wa_attr_str(err, "code") : NULL;
         char why[48];
         snprintf(why, sizeof why, "server refused the %s query (%s)",
-                 c->out.stage == OUT_PREKEYS ? "prekey" : "user", code ? code : "error");
+                 c->out.stage == OUT_PREKEYS ? "prekey" : c->out.stage == OUT_GROUP ? "group" : "user",
+                 code ? code : "error");
         out_fail(c, why);
         return true;
     }
     switch (c->out.stage) {
         case OUT_LID: on_lid(c, n); break;
+        case OUT_GROUP: on_group(c, n); break;
         case OUT_DEVICES: on_devices(c, n); break;
         case OUT_PREKEYS: on_prekeys(c, n); break;
     }
@@ -327,31 +394,85 @@ static void pad(wa_buf *b) {
     for (int i = 0; i < n; i++) wa_buf_byte(b, n);
 }
 
+static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+// send.go participantListHashV2: "2:" + base64(SHA-256(sorted AD strings))[:6 bytes].
+static void phash(wa_client *c, char out[16]) {
+    char ad[WA_SEND_MAX_DEVICES + 1][48];
+    char *p[WA_SEND_MAX_DEVICES + 1];
+    int n = 0;
+    for (int i = 0; i < c->out.ndev; i++, n++) {
+        snprintf(ad[n], sizeof ad[n], "%s.0:%u@lid", c->out.dev[i].user, (unsigned)c->out.dev[i].device);
+        p[n] = ad[n];
+    }
+    snprintf(ad[n], sizeof ad[n], "%s.0:%u@lid", c->store->lid_user, (unsigned)c->store->device);
+    p[n] = ad[n];
+    n++;
+    qsort(p, (size_t)n, sizeof p[0], cmp_str);
+    wa_buf all = {0};
+    for (int i = 0; i < n; i++) wa_buf_put(&all, p[i], strlen(p[i]));
+    uint8_t h[32];
+    wa_sha256(all.data, all.len, h);
+    wa_buf_free(&all);
+    memcpy(out, "2:", 2);
+    wa_base64(h, 6, out + 2);
+}
+
 static void encrypt_and_send(wa_client *c) {
     wa_sig s = sig_of(c);
+    bool group = c->out.group[0] != 0;
     // marshalMessage: Message { conversation=1 } for the recipient, and
     // Message { deviceSentMessage=31 { destinationJid=1, message=2 } } for
-    // our own other devices.
+    // our own other devices. A group gets the message once, encrypted with
+    // our sender key, and every device gets
+    // Message { senderKeyDistributionMessage=2 { groupId=1, axolotlSenderKeyDistributionMessage=2 } }.
     wa_buf msg = {0}, dsm = {0}, inner = {0}, plain = {0};
-    wa_pb_str(&plain, 1, c->out.text);
-    wa_buf_put(&msg, plain.data, plain.len);
-    pad(&msg);
-    char dest[48];
-    snprintf(dest, sizeof dest, "%s@lid", c->out.to_lid);
-    wa_pb_str(&inner, 1, dest);
-    wa_pb_bytes(&inner, 2, plain.data, plain.len);
-    wa_pb_msg(&dsm, 31, &inner);
-    pad(&dsm);
-    wa_buf_free(&plain);
-
+    uint8_t *skmsg = NULL, *skdm = NULL;
+    size_t skmsg_len = 0, skdm_len = 0;
+    char own_addr[64];
+    const char *err = NULL;
     int n = c->out.ndev;
     uint8_t *cts[WA_SEND_MAX_DEVICES] = {0};
     wa_attr to_attrs[WA_SEND_MAX_DEVICES][1], enc_attrs[WA_SEND_MAX_DEVICES][2];
     wa_node encs[WA_SEND_MAX_DEVICES], tos[WA_SEND_MAX_DEVICES];
     size_t nt = 0;
     bool any_prekey = false;
-    const char *err = NULL;
-    if (msg.oom || dsm.oom) {
+    wa_pb_str(&plain, 1, c->out.text);
+    if (group) {
+        wa_jid me = lid_jid(c->store->lid_user, c->store->device);
+        wa_jid_str(&me, own_addr, sizeof own_addr);
+        // The distribution message first: it carries the iteration the
+        // encryption below uses.
+        int rc = wa_sig_group_skdm(&s, c->out.group, own_addr, &skdm, &skdm_len);
+        if (rc) {
+            err = wa_sig_strerror(rc);
+            goto done;
+        }
+        wa_buf body = {0};
+        wa_buf_put(&body, plain.data, plain.len);
+        pad(&body);
+        rc = body.oom ? WA_SIG_ERR_NOMEM
+                      : wa_sig_group_encrypt(&s, c->out.group, own_addr, body.data, body.len, &skmsg, &skmsg_len);
+        wa_buf_free(&body);
+        if (rc) {
+            err = wa_sig_strerror(rc);
+            goto done;
+        }
+        wa_pb_str(&inner, 1, c->out.group);
+        wa_pb_bytes(&inner, 2, skdm, skdm_len);
+        wa_pb_msg(&msg, 2, &inner);
+        pad(&msg);
+    } else {
+        wa_buf_put(&msg, plain.data, plain.len);
+        pad(&msg);
+        char dest[48];
+        snprintf(dest, sizeof dest, "%s@lid", c->out.to_lid);
+        wa_pb_str(&inner, 1, dest);
+        wa_pb_bytes(&inner, 2, plain.data, plain.len);
+        wa_pb_msg(&dsm, 31, &inner);
+        pad(&dsm);
+    }
+    if (msg.oom || dsm.oom || plain.oom) {
         err = "out of memory";
         goto done;
     }
@@ -364,7 +485,7 @@ static void encrypt_and_send(wa_client *c) {
             continue;
         }
         bool own = strcmp(c->out.dev[i].user, c->store->lid_user) == 0;
-        const wa_buf *pt = own ? &dsm : &msg;
+        const wa_buf *pt = own && !group ? &dsm : &msg;
         size_t ctl;
         bool prekey;
         rc = wa_sig_encrypt(&s, addr, pt->data, pt->len, &cts[nt], &ctl, &prekey);
@@ -384,19 +505,31 @@ static void encrypt_and_send(wa_client *c) {
         err = "could not encrypt for any device";
         goto done;
     }
-    wa_node content[2];
+    wa_node content[3];
     size_t nc = 0;
     content[nc++] = (wa_node){"participants", NULL, 0, wa_vlist(tos, nt)};
     if (any_prekey)
         content[nc++] = (wa_node){"device-identity", NULL, 0, wa_vbytes(c->store->account, c->store->account_len)};
-    wa_attr attrs[4];
+    wa_attr sk_attrs[] = {{"v", wa_vstr("2")}, {"type", wa_vstr("skmsg")}};
+    if (group) content[nc++] = (wa_node){"enc", sk_attrs, 2, wa_vbytes(skmsg, skmsg_len)};
+    wa_attr attrs[5];
     size_t na = 0;
+    char guser[48], ph[16];
     attrs[na++] = (wa_attr){"id", wa_vstr(c->out.id)};
     attrs[na++] = (wa_attr){"type", wa_vstr("text")};
-    attrs[na++] = (wa_attr){"to", wa_vjid(lid_jid(c->out.to_lid, 0))};
-    if (c->out.pn[0]) {
-        wa_jid pn = {.user = c->out.pn, .server = "s.whatsapp.net"};
-        attrs[na++] = (wa_attr){"peer_recipient_pn", wa_vjid(pn)};
+    if (group) {
+        snprintf(guser, sizeof guser, "%.*s", (int)strcspn(c->out.group, "@"), c->out.group);
+        wa_jid g = {.user = guser, .server = "g.us"};
+        attrs[na++] = (wa_attr){"to", wa_vjid(g)};
+        attrs[na++] = (wa_attr){"addressing_mode", wa_vstr("lid")};
+        phash(c, ph);
+        attrs[na++] = (wa_attr){"phash", wa_vstr(ph)};
+    } else {
+        attrs[na++] = (wa_attr){"to", wa_vjid(lid_jid(c->out.to_lid, 0))};
+        if (c->out.pn[0]) {
+            wa_jid pn = {.user = c->out.pn, .server = "s.whatsapp.net"};
+            attrs[na++] = (wa_attr){"peer_recipient_pn", wa_vjid(pn)};
+        }
     }
     wa_node m = {"message", attrs, na, wa_vlist(content, nc)};
     wa__log(c, "send %s: encrypted for %zu of %d device(s)", c->out.id, nt, n);
@@ -404,6 +537,10 @@ static void encrypt_and_send(wa_client *c) {
     if (wa_client_send_node(c, &m)) err = "could not send the message";
 done:
     for (size_t i = 0; i < nt; i++) free(cts[i]);
+    free(skmsg);
+    free(skdm);
+    wa_buf_free(&plain);
+    wa_buf_free(&inner);
     wa_buf_free(&msg);
     wa_buf_free(&dsm);
     if (err) out_fail(c, err);
@@ -436,15 +573,16 @@ const char *wa_client_send_text(wa_client *c, const char *to, const char *text) 
     if (!c->logged_in || c->state != WA_S_OPEN || c->out.stage != OUT_IDLE || !c->store->lid_user[0] || !text ||
         !c->cb.kv.get)
         return NULL;
-    // A user JID without a device: "<number>@s.whatsapp.net" or "<lid>@lid".
+    // A user JID without a device ("<number>@s.whatsapp.net" or "<lid>@lid"),
+    // or a group ("<id>@g.us").
     const char *at = strchr(to, '@');
-    if (!at || at == to || (size_t)(at - to) >= sizeof c->out.to_lid || memchr(to, ':', (size_t)(at - to)) ||
-        memchr(to, '.', (size_t)(at - to)))
-        return NULL;
-    char user[32];
+    if (!at || at == to || memchr(to, ':', (size_t)(at - to)) || memchr(to, '.', (size_t)(at - to))) return NULL;
+    bool grp = strcmp(at + 1, "g.us") == 0;
+    if ((size_t)(at - to) >= (grp ? sizeof c->out.group - 5 : sizeof c->out.to_lid)) return NULL;
+    char user[48];
     snprintf(user, sizeof user, "%.*s", (int)(at - to), to);
     bool pn = strcmp(at + 1, "s.whatsapp.net") == 0;
-    if (!pn && strcmp(at + 1, "lid") != 0) return NULL;
+    if (!pn && !grp && strcmp(at + 1, "lid") != 0) return NULL;
     out_reset(c);
     if (!(c->out.text = strdup(text))) return NULL;
     // whatsmeow GenerateMessageID: "3EB0" and 18 upper-case hex digits.
@@ -457,8 +595,11 @@ const char *wa_client_send_text(wa_client *c, const char *to, const char *text) 
         c->out.id[5 + 2 * i] = hex[r[i] & 15];
     }
     c->out.id[22] = 0;
-    if (pn) {
-        snprintf(c->out.pn, sizeof c->out.pn, "%s", user);
+    if (grp) {
+        snprintf(c->out.group, sizeof c->out.group, "%.42s@g.us", user);
+        query_group(c);
+    } else if (pn) {
+        snprintf(c->out.pn, sizeof c->out.pn, "%.31s", user);
         const char *lid = lid_for(c, user);
         if (lid) {
             snprintf(c->out.to_lid, sizeof c->out.to_lid, "%s", lid);
@@ -467,7 +608,7 @@ const char *wa_client_send_text(wa_client *c, const char *to, const char *text) 
             query_lid(c);
         }
     } else {
-        snprintf(c->out.to_lid, sizeof c->out.to_lid, "%s", user);
+        snprintf(c->out.to_lid, sizeof c->out.to_lid, "%.31s", user);
         query_devices(c);
     }
     wa__log(c, "send %s to %s started", c->out.id, to);

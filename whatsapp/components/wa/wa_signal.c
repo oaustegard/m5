@@ -30,6 +30,7 @@
 #define REC_MAGIC 0x57615332u  // "WaS2" (WaS1 had no pending prekey fields)
 #define SK_MAGIC 0x57614731u   // "WaG1"
 #define PK_MAGIC 0x57615031u   // "WaP1"
+#define OWN_MAGIC 0x57614f31u  // "WaO1"
 
 const char *wa_sig_strerror(int rc) {
     switch (rc) {
@@ -105,6 +106,17 @@ typedef struct {
     uint8_t name_hash[32];
     sk_state st[SK_STATES];  // newest first
 } sk_record;
+
+// Our own sender key for one group (libsignal keeps it as a SenderKeyState
+// with a private signing key; we only ever have one per group).
+typedef struct {
+    uint32_t magic;
+    uint8_t name_hash[32];
+    uint32_t key_id;
+    uint32_t iter;
+    uint8_t ck[32];
+    uint8_t sign_priv[32], sign_pub[32];
+} sk_own;
 
 typedef struct {
     uint32_t id;
@@ -792,6 +804,112 @@ done:
     if (rc) *outlen = 0;
     free(pt);
     free(r);
+    return rc;
+}
+
+// groups.SessionBuilder.Create: our sender key for group, made on first use
+// (random key id, chain key and signing key, iteration 0).
+static int own_load(wa_sig *s, const char *group, const char *addr, sk_own *o, char key[16]) {
+    uint8_t hash[32];
+    kv_key('o', group, addr, key, hash);
+    int rc = kv_load(s, key, o, sizeof *o, OWN_MAGIC, hash);
+    if (rc < 0) return rc;
+    if (rc == 0) {
+        o->magic = OWN_MAGIC;
+        memcpy(o->name_hash, hash, 32);
+        uint8_t id[4];
+        if (wa_random(id, 4) || wa_random(o->ck, 32) || wa_x25519_keypair(o->sign_priv, o->sign_pub))
+            return WA_SIG_ERR_INVALID;
+        o->key_id = (uint32_t)(id[0] & 0x7f) << 24 | (uint32_t)id[1] << 16 | (uint32_t)id[2] << 8 | id[3];
+        o->iter = 0;
+        rc = kv_save(s, key, o, sizeof *o);
+        if (rc) return rc;
+    }
+    return WA_SIG_OK;
+}
+
+int wa_sig_group_skdm(wa_sig *s, const char *group, const char *addr, uint8_t **out, size_t *outlen) {
+    *out = NULL;
+    *outlen = 0;
+    sk_own o;
+    char key[16];
+    int rc = own_load(s, group, addr, &o, key);
+    if (rc) return rc;
+    // SenderKeyDistributionMessage: version || { id=1, iteration=2, chainKey=3, signingKey=4 }
+    uint8_t sk[33];
+    serialize_key(o.sign_pub, sk);
+    wa_buf b = {0};
+    wa_buf_byte(&b, VERSION_BYTE);
+    wa_pb_varint(&b, 1, o.key_id);
+    wa_pb_varint(&b, 2, o.iter);
+    wa_pb_bytes(&b, 3, o.ck, 32);
+    wa_pb_bytes(&b, 4, sk, 33);
+    memset(&o, 0, sizeof o);
+    if (b.oom) {
+        wa_buf_free(&b);
+        return WA_SIG_ERR_NOMEM;
+    }
+    *out = b.data;
+    *outlen = b.len;
+    return WA_SIG_OK;
+}
+
+int wa_sig_group_encrypt(wa_sig *s, const char *group, const char *addr, const uint8_t *in, size_t len,
+                         uint8_t **out, size_t *outlen) {
+    *out = NULL;
+    *outlen = 0;
+    sk_own o;
+    char key[16];
+    int rc = own_load(s, group, addr, &o, key);
+    if (rc) return rc;
+    // GroupCipher.Encrypt: the sender message key for this iteration, then
+    // SenderKeyMessage: version || { id=1, iteration=2, ciphertext=3 } || signature.
+    uint8_t seed[32], d[48];
+    static const uint8_t info[] = "WhisperGroup";
+    hmac1(o.ck, 1, seed);
+    wa_hkdf_sha256(NULL, 0, seed, 32, info, sizeof info - 1, d, 48);
+    uint8_t *ct = malloc(len + 16);
+    wa_buf b = {0};
+    size_t ctl;
+    if (!ct) {
+        rc = WA_SIG_ERR_NOMEM;
+        goto done;
+    }
+    if (wa_aes_cbc_encrypt(d + 16, d, in, len, ct, &ctl)) {
+        rc = WA_SIG_ERR_INVALID;
+        goto done;
+    }
+    wa_buf_byte(&b, VERSION_BYTE);
+    wa_pb_varint(&b, 1, o.key_id);
+    wa_pb_varint(&b, 2, o.iter);
+    wa_pb_bytes(&b, 3, ct, ctl);
+    if (b.oom) {
+        rc = WA_SIG_ERR_NOMEM;
+        goto done;
+    }
+    uint8_t sig[SIG_LEN];
+    if (wa_curve_sign(sig, o.sign_priv, b.data, b.len)) {
+        rc = WA_SIG_ERR_INVALID;
+        goto done;
+    }
+    wa_buf_put(&b, sig, SIG_LEN);
+    if (b.oom) {
+        rc = WA_SIG_ERR_NOMEM;
+        goto done;
+    }
+    hmac1(o.ck, 2, o.ck);  // SenderChainKey.Next
+    o.iter++;
+    rc = kv_save(s, key, &o, sizeof o);
+    if (rc) goto done;
+    *out = b.data;
+    *outlen = b.len;
+    b.data = NULL;
+done:
+    memset(&o, 0, sizeof o);
+    memset(seed, 0, sizeof seed);
+    memset(d, 0, sizeof d);
+    wa_buf_free(&b);
+    free(ct);
     return rc;
 }
 

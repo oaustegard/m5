@@ -70,6 +70,13 @@ int wa_sig_process_bundle(wa_sig *s, const char *addr, const wa_prekey_bundle *b
 // axolotlSenderKeyDistributionMessage bytes) for sender addr in group.
 int wa_sig_group_process(wa_sig *s, const char *group, const char *addr, const uint8_t *in, size_t len);
 // Decrypt an <enc type="skmsg">. Same output contract as wa_sig_decrypt.
+// Our own sender key for group (made on first use): the
+// SenderKeyDistributionMessage that lets others decrypt what we send, and
+// a SenderKeyMessage (<enc type="skmsg">) of the padded plaintext. addr names
+// our own device, as the receivers see it.
+int wa_sig_group_skdm(wa_sig *s, const char *group, const char *addr, uint8_t **out, size_t *outlen);
+int wa_sig_group_encrypt(wa_sig *s, const char *group, const char *addr, const uint8_t *in, size_t len,
+                         uint8_t **out, size_t *outlen);
 int wa_sig_group_decrypt(wa_sig *s, const char *group, const char *addr, const uint8_t *in, size_t len,
                          uint8_t **out, size_t *outlen);
 

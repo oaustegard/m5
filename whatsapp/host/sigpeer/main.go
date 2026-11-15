@@ -11,6 +11,8 @@
 //	dec <ct>              -> pt <plaintext>          decrypt a SignalMessage from Bob
 //	skdm <group>          -> skdm <bytes>            create Alice's sender key for a group
 //	genc <group> <pt>     -> skmsg <ct>              group-encrypt
+//	gproc <group> <sender> <skdm>  -> ok              store another sender's key
+//	gdec <group> <sender> <ct>     -> pt <plaintext>  decrypt that sender's skmsg
 //	ident                 -> ident <pub>             Alice's identity key
 //
 // It also plays "Carol", who publishes a bundle for the C side to start a
@@ -76,6 +78,16 @@ func main() {
 			names[group] = protocol.NewSenderKeyName(group, alice)
 		}
 		return names[group]
+	}
+
+	// Other senders' keys, by "group sender".
+	others := map[string]*protocol.SenderKeyName{}
+	otherName := func(group, sender string) *protocol.SenderKeyName {
+		k := group + " " + sender
+		if others[k] == nil {
+			others[k] = protocol.NewSenderKeyName(group, protocol.NewSignalAddress(sender, 0))
+		}
+		return others[k]
 	}
 
 	carolKP, _ := keyhelper.GenerateIdentityKeyPair()
@@ -252,6 +264,34 @@ func main() {
 					return err
 				}
 				reply("skmsg %x", m.(*protocol.SenderKeyMessage).SignedSerialize())
+			case "gproc":
+				b, err := hex.DecodeString(f[3])
+				if err != nil {
+					return err
+				}
+				m, err := protocol.NewSenderKeyDistributionMessageFromBytes(b, ser.SenderKeyDistributionMessage)
+				if err != nil {
+					return err
+				}
+				if err := gbuilder.Process(ctx, otherName(f[1], f[2]), m); err != nil {
+					return err
+				}
+				reply("ok")
+			case "gdec":
+				b, err := hex.DecodeString(f[3])
+				if err != nil {
+					return err
+				}
+				m, err := protocol.NewSenderKeyMessageFromBytes(b, ser.SenderKeyMessage)
+				if err != nil {
+					return err
+				}
+				gc := groups.NewGroupCipher(gbuilder, otherName(f[1], f[2]), senderKeys)
+				pt, err := gc.Decrypt(ctx, m)
+				if err != nil {
+					return err
+				}
+				reply("pt %x", pt)
 			default:
 				return fmt.Errorf("unknown command %q", f[0])
 			}

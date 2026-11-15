@@ -13,6 +13,8 @@
 // so a buffer is free again by the time the loop comes back to it.
 #define BAND_LINES 20
 
+#define SPEAKER_VOLUME 160
+
 static uint16_t *band[2];
 
 extern "C" void hal_init(void)
@@ -35,7 +37,7 @@ extern "C" void hal_init(void)
     spk.dma_buf_len = 256;
     M5.Speaker.config(spk);
     M5.Speaker.begin();
-    M5.Speaker.setVolume(160);
+    M5.Speaker.setVolume(SPEAKER_VOLUME);
 
     for (int i = 0; i < 2; i++)
         band[i] = (uint16_t *)heap_caps_malloc(HAL_SCREEN_W * BAND_LINES * sizeof(uint16_t),
@@ -77,6 +79,7 @@ extern "C" void hal_input_read(hal_input_t *in)
     in->btn_a = M5.BtnA.isPressed();
     in->btn_b = M5.BtnB.isPressed();
     in->btn_c = M5.BtnC.isPressed();
+    in->btn_pwr_click = M5.BtnPWR.wasClicked();
 
     in->touching = false;
     for (int i = 0, n = M5.Touch.getCount(); i < n; i++)
@@ -128,8 +131,9 @@ static void draw_setup_text(bool imu_ok)
         {"C", "map"},
         {"", "hold: menu"},
         {"Dead?", "tap to restart"},
+        {"Power", "mute / unmute"},
     };
-    int y = 68;
+    int y = 50;
     for (const auto &l : lines)
     {
         d.setTextColor(TFT_ORANGE, TFT_BLACK);
@@ -231,6 +235,11 @@ extern "C" bool hal_setup_screen(const hal_setup_t *cfg, float *neutral_x, float
     printf("m5: setup done, neutral %s %.3f,%.3f\n", captured ? "set" : "unset",
            captured ? *neutral_x : 0.0f, captured ? *neutral_y : 0.0f);
     return captured;
+}
+
+extern "C" void hal_set_muted(bool muted)
+{
+    M5.Speaker.setVolume(muted ? 0 : SPEAKER_VOLUME);
 }
 
 extern "C" void hal_vibrate(uint8_t level)

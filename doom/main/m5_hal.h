@@ -19,6 +19,7 @@ extern "C" {
 
 typedef struct {
     bool btn_a, btn_b, btn_c;    // the three touch zones under the screen
+    bool btn_pwr_click;          // short press of the power button (side)
     bool touching;               // a finger on the screen area itself (y < 240)
     int touch_x, touch_y;
     bool imu_ok;
@@ -51,6 +52,9 @@ bool hal_setup_screen(const hal_setup_t *cfg, float *neutral_x, float *neutral_y
 // Vibration motor strength, 0 = off. Applies immediately; timing is the
 // caller's job.
 void hal_vibrate(uint8_t level);
+
+// Mutes or unmutes the speaker's master volume (music and SFX).
+void hal_set_muted(bool muted);
 
 // Doom sound effects are unsigned 8-bit mono.
 bool hal_sfx_play(int channel, const uint8_t *data, size_t len, uint32_t rate, uint8_t volume);

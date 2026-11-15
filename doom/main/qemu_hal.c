@@ -213,6 +213,11 @@ bool hal_setup_screen(const hal_setup_t *cfg, float *neutral_x, float *neutral_y
     return true;
 }
 
+void hal_set_muted(bool muted)
+{
+    ESP_LOGI(TAG, "muted %d", muted);
+}
+
 void hal_input_read(hal_input_t *in)
 {
     memset(in, 0, sizeof(*in));

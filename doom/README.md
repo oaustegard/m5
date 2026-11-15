@@ -97,12 +97,18 @@ screen. They are zones of the same touch panel that covers the screen.
 |---|---|---|
 | while a demo plays | A, B or touching the screen opens the menu; C works as in game | — |
 | when you're dead | A, B or touching the screen restarts the level; C works as in game | — |
+| power button (left side), short press | mute / unmute music and sound effects | same |
 | tilt (top edge away / toward you) | move forward / back | — |
 | tilt (right edge down / left edge down) | turn right / left | — |
 | touch the screen | fire, while held | left third: slider left · middle: select · right third: slider right |
 | A (left circle) | use / open doors; hold 1.2 s to re-centre tilt (sets neutral to the current pose) | up |
 | B (middle circle) | switch weapon (PrBoom's toggle between your two preferred weapons) | select (also answers yes) |
 | C (right circle) | automap; hold 0.5 s for the menu | down; hold 0.5 s to go back (also answers no) |
+
+The power button's short press is read through the power-management chip.
+Holding it for about 6 seconds cuts power in hardware. The RST button is
+a hardware reset of the ESP32: it reboots to the setup screen and
+cannot be remapped. Mute lasts until the device restarts.
 
 At power-on a setup screen lists these controls and shows a tilt level: a
 dot for the current tilt, an inner ring where tilt starts to count (the dead

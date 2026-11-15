@@ -475,6 +475,7 @@ static void haptic_watch_player(void)
 //
 // In demos:  A, B or touch = menu; C as in game.
 // When dead: A, B or touch = restart (use); C as in game.
+// Anywhere:  power button (short press) = mute / unmute.
 // In game:   tilt = move/turn, touch screen = fire,
 //            A = use (hold 1.2 s: re-centre tilt), B = next weapon,
 //            C = automap (hold: menu).
@@ -603,6 +604,16 @@ void I_StartTic(void)
             }
         }
         prev[b] = now[b];
+    }
+
+    // A short press of the power button toggles sound for the whole session
+    static bool muted;
+    if (in.btn_pwr_click)
+    {
+        muted = !muted;
+        hal_set_muted(muted);
+        if (gamestate == GS_LEVEL)
+            players[consoleplayer].message = muted ? "SOUND OFF" : "SOUND ON";
     }
 
     analog_turn = 0;

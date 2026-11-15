@@ -24,7 +24,7 @@ vibration and the tilt thresholds still need more play-testing.
 
 ## Engine changes
 
-The engine differs from retro-go's copy in two places, both marked `m5:`.
+The engine differs from retro-go's copy in three places, all marked `m5:`.
 
 - **Analog movement** (`g_game.c`, `g_game.h`). PrBoom's joystick input is
   digital: any deflection turns or moves at full speed. To make tilt
@@ -33,6 +33,10 @@ The engine differs from retro-go's copy in two places, both marked `m5:`.
   positive moves forward). `doom_main.c` sets them from the accelerometer
   every game tick, and `G_BuildTiccmd` adds them to the turn and forward
   movement of the player's command for that tick.
+- **Menu touch** (`m_menu.c`, `m_menu.h`). `M_TouchItemAt` maps a screen y
+  to the big-font menu item drawn there, and `M_ItemOn`, `M_ItemIsSlider`
+  and `M_SetItemOn` let `doom_main.c` read and move the cursor, so a tap
+  can point at an item without going through key events.
 - **Hit callback** (`p_inter.c`, `i_system.h`). `P_DamageMobj` calls
   `I_HapticHit(damage, killed)` when the local player damages something, so
   the platform layer can buzz the motor on a hit.
@@ -98,9 +102,9 @@ screen. They are zones of the same touch panel that covers the screen.
 | while a demo plays | A, B or touching the screen opens the menu; C works as in game | — |
 | when you're dead | A, B or touching the screen restarts the level; C works as in game | — |
 | power button (left side), short press | mute / unmute music and sound effects | same |
-| tilt (top edge away / toward you) | move forward / back | — |
+| tilt (top edge away / toward you) | move forward / back | cursor up / down (repeats every 250 ms while held) |
 | tilt (right edge down / left edge down) | turn right / left | — |
-| touch the screen | fire, while held | left third: slider left · middle: select · right third: slider right |
+| touch the screen | fire, while held | tap an item to move the cursor to it, tap it again to select it; on a volume slider, tap the left or right third to nudge it. Setup screens and yes/no prompts keep the old layout: left third slider left, middle select, right third slider right |
 | A (left circle) | use / open doors; hold 1.2 s to re-centre tilt (sets neutral to the current pose) | up |
 | B (middle circle) | switch weapon (PrBoom's toggle between your two preferred weapons) | select (also answers yes) |
 | C (right circle) | automap; hold 0.5 s for the menu | down; hold 0.5 s to go back (also answers no) |

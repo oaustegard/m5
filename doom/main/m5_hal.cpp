@@ -132,15 +132,16 @@ static void draw_setup_text(bool imu_ok)
         {"", "hold: menu"},
         {"Dead?", "tap to restart"},
         {"Power", "mute / unmute"},
+        {"Menus", "tilt, or tap twice"},
     };
-    int y = 50;
+    int y = 48;
     for (const auto &l : lines)
     {
         d.setTextColor(TFT_ORANGE, TFT_BLACK);
         d.drawString(l[0], 184, y);
         d.setTextColor(TFT_WHITE, TFT_BLACK);
         d.drawString(l[1], l[0][0] ? 232 : 196, y);
-        y += 18;
+        y += 17;
     }
 
     d.setTextColor(TFT_DARKGREY, TFT_BLACK);

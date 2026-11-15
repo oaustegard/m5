@@ -315,13 +315,8 @@ static uint8_t *alice_enc(peer *p, const char *text, size_t *len, char type[8]) 
     char h[512];
     hexs((const uint8_t *)text, strlen(text), h);
     const char *r = peer_cmd(p, "enc %s", h);
-    uint8_t *b = reply_bytes(r, "pkmsg", len);
-    snprintf(type, 8, "pkmsg");
-    if (!b && strncmp(r, "msg ", 4) == 0) {
-        b = reply_bytes(r, "msg", len);
-        snprintf(type, 8, "msg");
-    }
-    return b;
+    snprintf(type, 8, "%s", strncmp(r, "msg ", 4) == 0 ? "msg" : "pkmsg");
+    return reply_bytes(r, type, len);
 }
 
 static int bob_dec(wa_sig *s, const char *addr, const char *type, const uint8_t *ct, size_t len, char *out, size_t cap) {
@@ -415,11 +410,21 @@ static void test_signal_interop(void) {
     CHECK(m2 && m3 && m4 && strcmp(t4, "pkmsg") == 0, "unacknowledged session keeps sending pkmsg");
     if (!m2 || !m3 || !m4) goto out;
     CHECK(bob_dec(&s, A, t4, m4, l4, got, sizeof got) == WA_SIG_OK && strcmp(got, "four") == 0, "out of order: 4th first");
-    m2[l2 - 1] ^= 1;
-    CHECK(bob_dec(&s, A, t2, m2, l2, got, sizeof got) == WA_SIG_ERR_BAD_MAC, "tampered message rejected");
-    m2[l2 - 1] ^= 1;
-    CHECK(bob_dec(&s, A, t2, m2, l2, got, sizeof got) == WA_SIG_OK && strcmp(got, "two") == 0,
-          "skipped key survives a failed attempt");
+    // A pkmsg ends with registrationId and signedPreKeyId; the inner
+    // SignalMessage's MAC is the last 8 bytes of field 4, just before them.
+    const uint8_t *inner;
+    size_t inner_len;
+    int rc2 = -99, rc3 = -99;
+    if (wa_pb_get_bytes(m2 + 1, l2 - 1, 4, &inner, &inner_len)) {
+        uint8_t *mac_byte = (uint8_t *)inner + inner_len - 1;
+        *mac_byte ^= 1;
+        rc2 = bob_dec(&s, A, t2, m2, l2, got, sizeof got);
+        *mac_byte ^= 1;
+    }
+    CHECK(rc2 == WA_SIG_ERR_BAD_MAC, "tampered message rejected");
+    rc3 = bob_dec(&s, A, t2, m2, l2, got, sizeof got);
+    CHECK(rc3 == WA_SIG_OK && strcmp(got, "two") == 0, "skipped key survives a failed attempt");
+    if (rc2 != WA_SIG_ERR_BAD_MAC || rc3) fprintf(stderr, "  tamper rc %d, retry rc %d\n", rc2, rc3);
     CHECK(bob_dec(&s, A, t3, m3, l3, got, sizeof got) == WA_SIG_OK && strcmp(got, "three") == 0, "out of order: 3rd last");
     CHECK(bob_dec(&s, A, t3, m3, l3, got, sizeof got) == WA_SIG_DUPLICATE, "skipped key used once");
     free(m2);

@@ -11,7 +11,7 @@ that use unofficial clients, so link a spare number rather than your own.
 | milestone | status |
 |---|---|
 | Noise handshake, server certificate chain, `pair-device` QR refs | works against `web.whatsapp.com` (host build) |
-| pairing (`pair-success`, device signature) and login | written, not yet tried with a phone |
+| pairing (`pair-success`, device signature) and login | works: paired with an iPhone from the host build, re-login reached `<success>` |
 | prekey upload, receiving and decrypting messages (Signal sessions) | not started |
 | ESP-IDF app: WiFi, WebSocket, QR on screen, store in NVS | not started |
 

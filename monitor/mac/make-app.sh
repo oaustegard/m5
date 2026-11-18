@@ -39,8 +39,12 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSBonjourServices</key><array><string>_m5mon._tcp</string></array>
 </dict></plist>
 PLIST
-# Ad-hoc signature: macOS ties Screen Recording and Accessibility grants to it.
-codesign --force --sign - "$app"
+# macOS ties Screen Recording and Accessibility grants to the signature. An
+# ad-hoc one changes with every build, so each rebuild would lose them; a
+# development certificate keeps them (the grant then follows the bundle ID
+# and team). Falls back to ad hoc when there is none.
+identity=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development[^"]*\)".*/\1/p' | head -1)
+codesign --force --sign "${identity:--}" "$app"
 rm -rf "$dest/M5 Monitor.app"
 cp -R "$app" "$dest/"
 echo "installed $dest/M5 Monitor.app"

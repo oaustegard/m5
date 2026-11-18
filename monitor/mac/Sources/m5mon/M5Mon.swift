@@ -411,7 +411,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
                 fail("cannot capture the screen. Allow Screen Recording for \(isApp ? "M5 Monitor" : "this terminal app") in System Settings > Privacy & Security, then open it again.")
             } catch {
                 if !retryForever && tries == 1 {
-                    fail("cannot capture the screen (\(error.localizedDescription)). Allow Screen Recording for \(isApp ? "M5 Monitor" : "this terminal app") in System Settings > Privacy & Security, then open it again.")
+                    fail("cannot capture the screen (\((error as NSError).domain) \((error as NSError).code): \(error.localizedDescription)). Allow Screen Recording for \(isApp ? "M5 Monitor" : "this terminal app") in System Settings > Privacy & Security, then open it again.")
                 }
             }
             if !retryForever && tries > 30 { fail("display \(wantID) is not available for capture") }

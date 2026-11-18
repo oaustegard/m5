@@ -11,8 +11,8 @@ usage: m5mon [source] [link] [options]
 
 source (default --virtual):
   --virtual [W]        add a display to macOS and show it on the Core2, W
-                       points wide (4:3, HiDPI). macOS will not go below
-                       800x600, so that is the default and the minimum
+                       points wide (4:3; default 320, one Mac pixel per
+                       Core2 pixel). 800 and up are HiDPI, shown scaled
   --display N          mirror all of display N (0 = main), letterboxed
   --region X,Y,W,H     mirror a rectangle of the main display, in points
   --follow [W]         mirror a W-point-wide 4:3 box that follows the mouse (default 640)
@@ -52,7 +52,7 @@ struct Options {
     var quality = 0.7
     var touch = false
     var setupWiFi = false
-    var virtualWidth = 800
+    var virtualWidth = 320
 }
 
 func parseOptions() -> Options {
@@ -491,16 +491,20 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
 var virtualDisplay: CGVirtualDisplay?
 var streamer: Streamer?
 
-/// Adds a display named "M5 Core2" and asks for the smallest 4:3 HiDPI mode
-/// at least `width` points wide. macOS lists modes down to 320x240, but
-/// 800x600 is the smallest it marks usable for the desktop, and switching
-/// to a smaller one fails with kCGErrorIllegalArgument.
+/// Adds a display named "M5 Core2", `width` points wide and 4:3.
+///
+/// macOS will not run a HiDPI desktop below 800x600 and refuses to switch
+/// to a smaller mode, but a non-HiDPI virtual display gets half the size
+/// of the mode it is given: a 640x480 mode becomes a 320x240-point desktop
+/// at one pixel per point, exactly the Core2's panel.
 func makeVirtualDisplay(width: Int) -> CGDirectDisplayID? {
+    let w = UInt32(width), h = UInt32(width * 3 / 4)
+    let hiDPI = width >= 800
     let d = CGVirtualDisplayDescriptor()
     d.queue = DispatchQueue.main
     d.name = "M5 Core2"
-    d.maxPixelsWide = 1600
-    d.maxPixelsHigh = 1200
+    d.maxPixelsWide = 2 * w
+    d.maxPixelsHigh = 2 * h
     d.sizeInMillimeters = CGSize(width: 41, height: 31)  // the Core2's 2-inch panel
     d.vendorID = 0x4D35  // "M5"
     d.productID = 0x0140  // 320
@@ -508,24 +512,12 @@ func makeVirtualDisplay(width: Int) -> CGDirectDisplayID? {
     d.terminationHandler = { _, _ in log("macOS removed the virtual display") }
     let v = CGVirtualDisplay(descriptor: d)
     let s = CGVirtualDisplaySettings()
-    s.hiDPI = 1
-    s.modes = [320, 400, 512, 640, 800, 1024].map { CGVirtualDisplayMode(width: UInt32($0), height: UInt32($0 * 3 / 4), refreshRate: 30) }
+    s.hiDPI = hiDPI ? 1 : 0
+    s.modes = hiDPI ? [CGVirtualDisplayMode(width: w, height: h, refreshRate: 30)]
+                    : [CGVirtualDisplayMode(width: 2 * w, height: 2 * h, refreshRate: 30)]
     guard v.apply(s), v.displayID != 0 else { return nil }
     virtualDisplay = v
-    let id = v.displayID
-    usleep(500_000)
-    let opts = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
-    let modes = (CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? [])
-        .filter { $0.pixelWidth == 2 * $0.width && $0.width * 3 == $0.height * 4 && $0.width >= width }
-        .sorted { $0.width < $1.width }
-    for m in modes {
-        if CGDisplayCopyDisplayMode(id)?.width == m.width { break }
-        var cfg: CGDisplayConfigRef?
-        CGBeginDisplayConfiguration(&cfg)
-        CGConfigureDisplayWithDisplayMode(cfg, id, m, nil)
-        if CGCompleteDisplayConfiguration(cfg, .forSession) == .success { break }
-    }
-    return id
+    return v.displayID
 }
 
 // MARK: - Main

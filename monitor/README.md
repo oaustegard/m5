@@ -27,9 +27,12 @@ The virtual display uses CoreGraphics' undocumented `CGVirtualDisplay`
 classes, the same ones DeskPad and BetterDisplay use. macOS treats it as real
 hardware: it appears in System Settings > Displays as "M5 Core2", windows
 can be dragged onto it, and it disappears when `m5mon` exits. It is
-800×600 points (HiDPI), shown on the Core2 at 40%: macOS lists modes down
-to 320×240 but refuses to switch the desktop to anything smaller than
-800×600. `--virtual 1024` makes it bigger, and even less legible.
+320×240 points at one pixel per point, so each Mac pixel is one Core2
+pixel and nothing is scaled. macOS will not run a HiDPI desktop smaller
+than 800×600, and refuses to switch any display to a mode it does not mark
+usable, but a non-HiDPI virtual display gets half the size of the mode it
+is created with: asking for 640×480 yields a 320×240 desktop.
+`--virtual 800` (or wider) makes a HiDPI display instead, shown scaled down.
 
 The wire format is described at the top of `main/main.cpp`.
 

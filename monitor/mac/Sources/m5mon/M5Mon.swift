@@ -116,14 +116,14 @@ func request(_ link: Link, _ msg: [UInt8], want: Character, timeout: Double) -> 
     return got
 }
 
-func serialPort(_ o: Options) -> String {
+func serialPort(_ o: Options) throws -> String {
     if case .some(.some(let p)) = o.serial { return p }
-    guard let p = findSerialPort() else { fail("no USB serial port found: is the Core2 plugged in?") }
+    guard let p = findSerialPort() else { throw LinkError.failed("no USB serial port found: is the Core2 plugged in?") }
     return p
 }
 
 func connectSerial(_ o: Options) throws -> Link {
-    let link = try openSerial(path: serialPort(o))
+    let link = try openSerial(path: try serialPort(o))
     link.start()
     // A host that just restarted may find the device still at streaming speed.
     setBaud(link.fd, o.baud)

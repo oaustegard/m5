@@ -1,0 +1,6 @@
+# Name,   Type, SubType, Offset,  Size
+# nvs sits where the other projects in this repo put it, so WiFi credentials
+# saved by any of them survive flashing this one.
+nvs,      data, nvs,     0x9000,  0x6000
+phy_init, data, phy,     0xf000,  0x1000
+factory,  app,  factory, 0x10000, 3M

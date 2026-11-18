@@ -26,7 +26,8 @@ options:
   --fps N              capture rate (default 30)
   --lossless           never use JPEG
   --quality Q          JPEG quality 0..1 (default 0.7)
-  --no-touch           ignore the touch screen
+  --touch              let the touch screen and buttons click on the Mac
+                       (off by default; needs Accessibility permission)
   --setup-wifi         send this Mac's WiFi network and password (from the
                        Keychain) to the Core2 over USB serial, then exit
 
@@ -49,7 +50,7 @@ struct Options {
     var fps = 30
     var lossless = false
     var quality = 0.7
-    var touch = true
+    var touch = false
     var setupWiFi = false
     var virtualWidth = 800
 }
@@ -80,6 +81,7 @@ func parseOptions() -> Options {
         case "--fps": o.fps = max(1, min(60, Int(need(a)) ?? 30))
         case "--lossless": o.lossless = true
         case "--quality": o.quality = Double(need(a)) ?? 0.7
+        case "--touch": o.touch = true
         case "--no-touch": o.touch = false
         case "--setup-wifi": o.setupWiFi = true
         case "-h", "--help": print(usage); exit(0)
@@ -241,6 +243,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
     func lost() {
         guard link != nil else { return }
         log("link lost (\(link?.lastError ?? "")); reconnecting")
+        releaseMouse()
         link?.close()
         link = nil
         reconnect()
@@ -404,6 +407,14 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
         e?.post(tap: .cghidEventTap)
     }
 
+    var mouseDown = false
+
+    /// A touch that never got its "up" (the Core2 unplugged or reset mid-
+    /// touch) would leave the Mac's mouse button held down.
+    func releaseMouse() {
+        if mouseDown { post(.leftMouseUp, touchPoint, clicks: clicks); mouseDown = false }
+    }
+
     func touch(kind: UInt8, at p: CGPoint) {
         touchFreezeUntil = Date().addingTimeInterval(1.5)
         switch kind {
@@ -416,11 +427,13 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
             post(.mouseMoved, point)
             clicks = double ? 2 : 1
             post(.leftMouseDown, point, clicks: clicks)
+            mouseDown = true
         case 1:
             touchPoint = p
             post(.leftMouseDragged, p)
         default:
             post(.leftMouseUp, touchPoint, clicks: clicks)
+            mouseDown = false
         }
     }
 
@@ -441,6 +454,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
 // MARK: - Virtual display
 
 var virtualDisplay: CGVirtualDisplay?
+var streamer: Streamer?
 
 /// Adds a display named "M5 Core2" and asks for the smallest 4:3 HiDPI mode
 /// at least `width` points wide. macOS lists modes down to 320x240, but
@@ -551,7 +565,8 @@ struct M5Mon {
             if case .follow(let w) = o.source { s.follow(width: w) }
         }
         timer.resume()
-        signal(SIGINT) { _ in exit(0) }
+        streamer = s
+        for sig in [SIGINT, SIGTERM, SIGHUP] { signal(sig) { _ in streamer?.releaseMouse(); exit(0) } }
         while true { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
     }
 }

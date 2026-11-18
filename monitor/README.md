@@ -65,8 +65,9 @@ mac/.build/release/m5mon --display 0        # the whole main display, letterboxe
 ```
 
 macOS asks for Screen Recording permission for the terminal app the first
-time. Touch input needs Accessibility permission for the same app; without
-it the picture still works and taps do nothing.
+time. Touch input is off unless you pass `--touch`, and then needs
+Accessibility permission for the same app. If the link drops while a finger
+is down, `m5mon` releases the mouse button rather than leave it held.
 
 On the Core2: tap to click, drag to drag, tap twice to double-click. The
 three buttons under the screen are A scroll up, B right-click and C scroll

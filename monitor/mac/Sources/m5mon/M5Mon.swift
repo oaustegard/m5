@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // m5mon: use an M5Stack Core2 as a (very) small external monitor.
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -350,6 +351,14 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        // "Stop Sharing" in the menu bar's screen-recording indicator means
+        // stop: remove the display and quit.
+        if (error as NSError).code == SCStreamError.userStopped.rawValue {
+            log("stopped from the menu bar")
+            releaseMouse()
+            if isApp { DispatchQueue.main.async { NSApp.terminate(nil) } } else { exit(0) }
+            return
+        }
         // Sleep, lock or a display change: start again when it comes back.
         log("capture stopped (\(error.localizedDescription)); retrying")
         q.async { self.stream = nil }

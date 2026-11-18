@@ -64,14 +64,21 @@ sh mac/make-app.sh          # builds "M5 Monitor.app" into /Applications
 ```
 
 Open M5 Monitor from Applications (or Spotlight) and the "M5 Core2"
-display appears; a display icon in the menu bar shows whether the Core2 is
-connected, switches touch on and off, and quits, which removes the display.
+display appears, along with a small control window: whether the Core2 is
+connected, a touch switch, where the display sits next to the main screen,
+and a button that stops and removes the display. Closing the window leaves
+it running; opening the app again brings the window back. The same controls
+are under a display icon in the menu bar, though on a MacBook with a notch
+that icon is easily hidden. "Stop Sharing" in macOS's screen-recording
+indicator also stops it.
+
 It uses USB when the Core2 is plugged in and WiFi otherwise, waits for the
 Core2 if it is not there yet, and picks up again after the Mac sleeps. The
 first launch asks for Screen Recording permission (then open it again);
-turning on touch asks for Accessibility. Each rebuild is a new ad-hoc
-signature, so macOS may ask again. It logs to
-`~/Library/Logs/M5 Monitor.log`.
+turning on touch asks for Accessibility. `make-app.sh` signs with an Apple
+Development certificate if the keychain has one, so permissions survive
+rebuilds; an ad-hoc signature (the fallback) loses them each time. It logs
+to `~/Library/Logs/M5 Monitor.log`.
 
 ## Command line
 

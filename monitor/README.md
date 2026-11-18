@@ -54,10 +54,26 @@ That reads the Mac's current network from `ipconfig` and its password from
 the Keychain (macOS asks first), sends both over USB, and the Core2
 restarts and joins. Without WiFi the monitor still works over the cable.
 
-## Use
+## The app
 
 ```sh
-mac/.build/release/m5mon                    # virtual display, WiFi if m5mon.local answers, else USB
+sh mac/make-app.sh          # builds "M5 Monitor.app" into /Applications
+```
+
+Open M5 Monitor from Applications (or Spotlight) and the "M5 Core2"
+display appears; a display icon in the menu bar shows whether the Core2 is
+connected, switches touch on and off, and quits, which removes the display.
+It uses USB when the Core2 is plugged in and WiFi otherwise, waits for the
+Core2 if it is not there yet, and picks up again after the Mac sleeps. The
+first launch asks for Screen Recording permission (then open it again);
+turning on touch asks for Accessibility. Each rebuild is a new ad-hoc
+signature, so macOS may ask again. It logs to
+`~/Library/Logs/M5 Monitor.log`.
+
+## Command line
+
+```sh
+mac/.build/release/m5mon                    # virtual display, over USB if plugged in, else WiFi
 mac/.build/release/m5mon --serial           # force the USB cable
 mac/.build/release/m5mon --follow 640       # a 640×480 box that follows the mouse
 mac/.build/release/m5mon --region 0,0,800,600

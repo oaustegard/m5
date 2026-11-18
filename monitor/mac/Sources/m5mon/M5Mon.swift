@@ -17,7 +17,7 @@ source (default --virtual):
   --region X,Y,W,H     mirror a rectangle of the main display, in points
   --follow [W]         mirror a W-point-wide 4:3 box that follows the mouse (default 640)
 
-link (default: m5mon.local over WiFi, else the first USB serial port):
+link (default: USB if the Core2 is plugged in, else m5mon.local over WiFi):
   --host HOST          WiFi: hostname or IP of the Core2
   --serial [PORT]      USB serial; PORT defaults to the first /dev/cu.usbserial-*
   --baud N             serial speed for streaming (default 2000000)
@@ -93,6 +93,7 @@ func parseOptions() -> Options {
 
 func fail(_ s: String) -> Never {
     FileHandle.standardError.write((s + "\n").data(using: .utf8)!)
+    if isApp { if Thread.isMainThread { appFail(s) } else { DispatchQueue.main.sync { appFail(s) } } }
     exit(1)
 }
 
@@ -152,12 +153,9 @@ func connectSerial(_ o: Options) throws -> Link {
 func connect(_ o: Options) throws -> Link {
     if o.serial != nil { return try connectSerial(o) }
     if let h = o.host { return try connectTCP(host: h, port: 5320) }
-    do {
-        return try connectTCP(host: "m5mon.local", port: 5320)
-    } catch {
-        if findSerialPort() != nil { return try connectSerial(o) }
-        throw error
-    }
+    // Plugged in means the cable was meant: use it. Otherwise WiFi.
+    if findSerialPort() != nil, let l = try? connectSerial(o) { return l }
+    return try connectTCP(host: "m5mon.local", port: 5320)
 }
 
 // MARK: - WiFi setup
@@ -197,6 +195,11 @@ func setupWiFi(_ o: Options) {
 
 final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
     let o: Options
+    var touchEnabled = false
+    /// One line for the menu bar app.
+    var status = "Looking for the Core2…"
+    var source: CGRect?
+    var wantID: CGDirectDisplayID = 0
     let q = DispatchQueue(label: "m5mon.stream")
     let enc = FrameEncoder()
     var link: Link?
@@ -221,6 +224,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     init(o: Options) {
         self.o = o
+        touchEnabled = o.touch
         enc.jpegQuality = o.quality
         enc.allowJPEG = !o.lossless
     }
@@ -236,6 +240,8 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
             self.enc.jpegRatio = l.name.hasPrefix("usb") ? 1.5 : 3
             self.enc.forceFull()
             log("connected over \(l.name)")
+            self.status = l.name.hasPrefix("usb") ? "Showing on the Core2 over USB" : "Showing on the Core2 over WiFi"
+
             self.pump()
         }
     }
@@ -243,6 +249,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
     func lost() {
         guard link != nil else { return }
         log("link lost (\(link?.lastError ?? "")); reconnecting")
+        status = "Core2 disconnected; waiting for it…"
         releaseMouse()
         link?.close()
         link = nil
@@ -270,13 +277,13 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
             inFlight = max(0, inFlight - 1)
             frames += 1
             pump()
-        case "T" where o.touch && m.payload.count == 5:
+        case "T" where touchEnabled && m.payload.count == 5:
             let x = CGFloat(Int(m.payload[1]) | Int(m.payload[2]) << 8)
             let y = CGFloat(Int(m.payload[3]) | Int(m.payload[4]) << 8)
             let origin = CGDisplayBounds(display.displayID).origin
             touch(kind: m.payload[0], at: CGPoint(x: origin.x + target.minX + (x + 0.5) * target.width / CGFloat(screenW),
                                                   y: origin.y + target.minY + (y + 0.5) * target.height / CGFloat(screenH)))
-        case "B" where o.touch && m.payload.count == 1:
+        case "B" where touchEnabled && m.payload.count == 1:
             button(Int(m.payload[0]))
         default:
             break
@@ -343,7 +350,10 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        fail("capture stopped: \(error.localizedDescription)")
+        // Sleep, lock or a display change: start again when it comes back.
+        log("capture stopped (\(error.localizedDescription)); retrying")
+        q.async { self.stream = nil }
+        Task { await self.capture(retryForever: true) }
     }
 
     func start(display: SCDisplay, source: CGRect?) async throws {
@@ -382,6 +392,31 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
         try await s.startCapture()
         stream = s
+    }
+
+    /// Finds the display and starts capturing it, waiting for it to appear
+    /// (a new virtual display takes a moment; none are offered while the Mac
+    /// sleeps or is locked).
+    func capture(retryForever: Bool) async {
+        var tries = 0
+        while true {
+            tries += 1
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                if let d = content.displays.first(where: { $0.displayID == wantID }) {
+                    try await start(display: d, source: source)
+                    return
+                }
+            } catch let e as NSError where tries == 1 && e.domain == SCStreamErrorDomain && e.code == SCStreamError.userDeclined.rawValue {
+                fail("cannot capture the screen. Allow Screen Recording for \(isApp ? "M5 Monitor" : "this terminal app") in System Settings > Privacy & Security, then open it again.")
+            } catch {
+                if !retryForever && tries == 1 {
+                    fail("cannot capture the screen (\(error.localizedDescription)). Allow Screen Recording for \(isApp ? "M5 Monitor" : "this terminal app") in System Settings > Privacy & Security, then open it again.")
+                }
+            }
+            if !retryForever && tries > 30 { fail("display \(wantID) is not available for capture") }
+            try? await Task.sleep(nanoseconds: retryForever ? 2_000_000_000 : 200_000_000)
+        }
     }
 
     /// --follow: keep the source box centred on the mouse.
@@ -498,63 +533,50 @@ func makeVirtualDisplay(width: Int) -> CGDirectDisplayID? {
 @main
 struct M5Mon {
     static func main() async {
-        let o = parseOptions()
+        if isApp {
+            // Opened from Finder: a menu bar app around the same streamer.
+            startApp()  // runs the app; never returns
+        }
+        await run(parseOptions())
+    }
+
+    static func run(_ o: Options) async {
         if o.setupWiFi { setupWiFi(o); exit(0) }
 
-        if o.touch && !AXIsProcessTrusted() {
+        if o.touch && !AXIsProcessTrusted() && !isApp {
             log("touch needs Accessibility access for this terminal app (System Settings > Privacy & Security > Accessibility); until then taps do nothing")
         }
 
         let s = Streamer(o: o)
-        do {
-            let l = try connect(o)
-            s.attach(l)
-        } catch {
-            fail("\(error)")
+        streamer = s
+        if isApp {
+            s.reconnect()  // keeps trying until the Core2 turns up
+        } else {
+            do { s.attach(try connect(o)) } catch { fail("\(error)") }
         }
 
-        var wantID: CGDirectDisplayID
-        var source: CGRect? = nil
         switch o.source {
         case .virtual:
             guard let id = makeVirtualDisplay(width: o.virtualWidth) else { fail("macOS refused to create the virtual display; try --follow") }
-            wantID = id
+            s.wantID = id
             log("added display \"M5 Core2\" (id \(id)); arrange it in System Settings > Displays")
         case .display(let n):
             var ids = [CGDirectDisplayID](repeating: 0, count: 16)
             var count: UInt32 = 0
             CGGetActiveDisplayList(16, &ids, &count)
             guard n < count else { fail("there is no display \(n); this Mac has \(count)") }
-            wantID = n == 0 ? CGMainDisplayID() : ids[n]
+            s.wantID = n == 0 ? CGMainDisplayID() : ids[n]
         case .region(let r):
-            wantID = CGMainDisplayID()
-            source = r
+            s.wantID = CGMainDisplayID()
+            s.source = r
         case .follow(let w):
-            wantID = CGMainDisplayID()
-            source = CGRect(x: 0, y: 0, width: w, height: w * 3 / 4)
+            s.wantID = CGMainDisplayID()
+            s.source = CGRect(x: 0, y: 0, width: w, height: w * 3 / 4)
         }
-
-        // A new display takes a moment to show up for capture.
-        var display: SCDisplay?
-        for _ in 0..<30 {
-            do {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                display = content.displays.first { $0.displayID == wantID }
-            } catch {
-                fail("cannot capture the screen (\(error.localizedDescription)). Allow Screen Recording for this terminal app in System Settings > Privacy & Security, then run again.")
-            }
-            if display != nil { break }
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        guard let display else { fail("display \(wantID) is not available for capture") }
+        await s.capture(retryForever: false)
         if case .virtual = o.source {
-            let b = CGDisplayBounds(wantID)
+            let b = CGDisplayBounds(s.wantID)
             log("virtual display is \(Int(b.width))x\(Int(b.height)) points at (\(Int(b.minX)),\(Int(b.minY)))")
-        }
-        do {
-            try await s.start(display: display, source: source)
-        } catch {
-            fail("cannot start capture: \(error.localizedDescription)")
         }
         log("streaming; Ctrl-C to stop")
 
@@ -565,7 +587,6 @@ struct M5Mon {
             if case .follow(let w) = o.source { s.follow(width: w) }
         }
         timer.resume()
-        streamer = s
         for sig in [SIGINT, SIGTERM, SIGHUP] { signal(sig) { _ in streamer?.releaseMouse(); exit(0) } }
         while true { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
     }

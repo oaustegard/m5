@@ -10,9 +10,9 @@ let usage = """
 usage: m5mon [source] [link] [options]
 
 source (default --virtual):
-  --virtual [W]        add a display to macOS and show it on the Core2. W is
-                       its width in points (default 320, 4:3, HiDPI); macOS
-                       may insist on 800x600, which still fits, just smaller
+  --virtual [W]        add a display to macOS and show it on the Core2, W
+                       points wide (4:3, HiDPI). macOS will not go below
+                       800x600, so that is the default and the minimum
   --display N          mirror all of display N (0 = main), letterboxed
   --region X,Y,W,H     mirror a rectangle of the main display, in points
   --follow [W]         mirror a W-point-wide 4:3 box that follows the mouse (default 640)
@@ -51,7 +51,7 @@ struct Options {
     var quality = 0.7
     var touch = true
     var setupWiFi = false
-    var virtualWidth = 320
+    var virtualWidth = 800
 }
 
 func parseOptions() -> Options {
@@ -240,7 +240,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func lost() {
         guard link != nil else { return }
-        log("link lost; reconnecting")
+        log("link lost (\(link?.lastError ?? "")); reconnecting")
         link?.close()
         link = nil
         reconnect()
@@ -443,9 +443,9 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
 var virtualDisplay: CGVirtualDisplay?
 
 /// Adds a display named "M5 Core2" and asks for the smallest 4:3 HiDPI mode
-/// at least `width` points wide. macOS lists modes down to 320x240 but on
-/// its own picks 800x600, the smallest it marks usable for the desktop, and
-/// may refuse to switch below that.
+/// at least `width` points wide. macOS lists modes down to 320x240, but
+/// 800x600 is the smallest it marks usable for the desktop, and switching
+/// to a smaller one fails with kCGErrorIllegalArgument.
 func makeVirtualDisplay(width: Int) -> CGDirectDisplayID? {
     let d = CGVirtualDisplayDescriptor()
     d.queue = DispatchQueue.main
@@ -460,7 +460,7 @@ func makeVirtualDisplay(width: Int) -> CGDirectDisplayID? {
     let v = CGVirtualDisplay(descriptor: d)
     let s = CGVirtualDisplaySettings()
     s.hiDPI = 1
-    s.modes = [320, 400, 512, 640, 800].map { CGVirtualDisplayMode(width: UInt32($0), height: UInt32($0 * 3 / 4), refreshRate: 30) }
+    s.modes = [320, 400, 512, 640, 800, 1024].map { CGVirtualDisplayMode(width: UInt32($0), height: UInt32($0 * 3 / 4), refreshRate: 30) }
     guard v.apply(s), v.displayID != 0 else { return nil }
     virtualDisplay = v
     let id = v.displayID

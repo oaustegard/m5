@@ -26,9 +26,10 @@ that, so a slow link drops frame rate instead of building up lag.
 The virtual display uses CoreGraphics' undocumented `CGVirtualDisplay`
 classes, the same ones DeskPad and BetterDisplay use. macOS treats it as real
 hardware: it appears in System Settings > Displays as "M5 Core2", windows
-can be dragged onto it, and it disappears when `m5mon` exits. `m5mon` asks
-for a 320×240-point HiDPI mode; macOS may hold out for 800×600, the smallest
-mode it marks usable for the desktop, which still works and is shown scaled.
+can be dragged onto it, and it disappears when `m5mon` exits. It is
+800×600 points (HiDPI), shown on the Core2 at 40%: macOS lists modes down
+to 320×240 but refuses to switch the desktop to anything smaller than
+800×600. `--virtual 1024` makes it bigger, and even less legible.
 
 The wire format is described at the top of `main/main.cpp`.
 
@@ -71,6 +72,11 @@ On the Core2: tap to click, drag to drag, tap twice to double-click. The
 three buttons under the screen are A scroll up, B right-click and C scroll
 down. With no Mac streaming, the screen shows the Core2's address and how
 it is connected.
+
+Mirroring the main display over USB runs at about 25 fps. WiFi needs the
+terminal app to have Local Network permission (macOS asks the first time);
+without it connecting to `m5mon.local` fails with "No route to host" and
+`m5mon` falls back to the cable.
 
 Over USB the link starts at 115200 baud and switches to 2 Mbaud for
 streaming; `--baud 921600` is the fallback for cables or adapters that do

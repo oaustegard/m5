@@ -11,7 +11,7 @@ Each project is self-contained in its own directory. Firmware is ESP-IDF; `pager
 |---|---|---|
 | [`doom/`](doom/) | PrBoom with shareware DOOM1.WAD: tilt to move, touch to fire, vibration on shots, hits and damage | plays on a Core2 |
 | [`whatsapp/`](whatsapp/) | A WhatsApp linked-device client ported from whatsmeow to C: QR pairing on screen | pairs with a phone and logs in from a host build; messages and firmware not started |
-| [`monitor/`](monitor/) | A deliberately tiny external monitor for a Mac: a virtual display (or a mirrored region) streamed over WiFi or USB, with touch as mouse clicks | Mac side tested against a stand-in device; awaiting a hardware run |
+| [`monitor/`](monitor/) | A deliberately tiny external monitor for a Mac: a virtual display (or a mirrored region) streamed over WiFi or USB, with touch as mouse clicks | streams to a real Core2 over USB at about 25 fps; WiFi and touch not yet tried by a person |
 | [`pager/`](pager/) | The Core2 as a pager for Muninn: a button press starts a Claude Code session, and session state and yes/no questions come back to the screen | Cloudflare Worker deployed and tested; firmware not started |
 
 ## Toolchain

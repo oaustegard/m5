@@ -189,7 +189,7 @@ static void serial_task(void *arg) {
         // host (or idf.py monitor) can talk to us again.
         uint32_t baud = 0;
         uart_get_baudrate(UART_NUM_0, &baud);
-        if (baud != SERIAL_BAUD) {
+        if (baud > SERIAL_BAUD * 11 / 10) {  // the driver reports 115200 as 115201 or so
             uart_set_baudrate(UART_NUM_0, SERIAL_BAUD);
             esp_log_level_set("*", ESP_LOG_INFO);
             ESP_LOGI(TAG, "serial idle, back to %d baud", SERIAL_BAUD);

@@ -28,6 +28,7 @@ class Link {
     var onClose: (() -> Void)?
     private let writeLock = NSLock()
     private var closed = false
+    var lastError = ""
 
     init(fd: Int32, name: String) {
         self.fd = fd
@@ -47,6 +48,7 @@ class Link {
             let r = bytes.withUnsafeBytes { write(fd, $0.baseAddress! + off, bytes.count - off) }
             if r < 0 {
                 if errno == EINTR || errno == EAGAIN { usleep(500); continue }
+                lastError = "write: \(String(cString: strerror(errno)))"
                 return false
             }
             off += r
@@ -66,7 +68,7 @@ class Link {
         while true {
             let r = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress!, 4096) }
             if r < 0 && (errno == EINTR || errno == EAGAIN) { usleep(1000); continue }
-            if r <= 0 { break }
+            if r <= 0 { lastError = r == 0 ? "read: end of file" : "read: \(String(cString: strerror(errno)))"; break }
             pending.append(contentsOf: buf[0..<r])
             // Scan for A5 5A; everything else is console log text from the
             // device (on the serial port) and is skipped.
@@ -145,6 +147,10 @@ func openSerial(path: String) throws -> Link {
 /// Finds the Core2's USB serial port (CP2104 or CH9102).
 func findSerialPort() -> String? {
     let names = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
-    return names.filter { $0.hasPrefix("cu.usbserial") || $0.hasPrefix("cu.wchusbserial") || $0.hasPrefix("cu.SLAB_USBtoUART") }
-        .sorted().first.map { "/dev/" + $0 }
+    // Silicon Labs' own driver adds cu.SLAB_USBtoUART for the same chip as
+    // Apple's cu.usbserial-*, and loses the link under load: prefer Apple's.
+    for prefix in ["cu.usbserial", "cu.wchusbserial", "cu.SLAB_USBtoUART"] {
+        if let n = names.filter({ $0.hasPrefix(prefix) }).sorted().first { return "/dev/" + n }
+    }
+    return nil
 }
